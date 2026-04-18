@@ -1,0 +1,184 @@
+{
+    "errors": [
+        {
+            "code": "E5",
+            "name": "Water Supply Failure",
+            "detection_rules": "• if the water supply is not finished within 20 minutes\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E1",
+            "name": "Drain Failure",
+            "detection_rules": "• if the water level doesn't reach the reset level with 15 minutes from the beginning of the drain\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E2",
+            "name": "Lid Opening Failure",
+            "detection_rules": "• if the lid is opened during delay start, wash, rinse and spin processes\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E3-2",
+            "name": "Unbalance Failure",
+            "detection_rules": "• if the clothes is collected on one side during spin and the automatic unbalance correction didn’t help to rectify the issue\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E6-1",
+            "name": "Overflow Failure",
+            "detection_rules": "• Continuous Water Supply Failure \n• if the water reaches the normal overflow level, drain pump is operating only\n• if for whatever reason, the water reaches a dangerous water level. The drain pump is operating and the water inlets are closed\n• if for some reason, the water remains at the dangerous overflow level for 5 minutes. this error alarms\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E5-1",
+            "name": "Abnormal Water Level Sensor Reading",
+            "detection_rules": "• if the detected water level frequency is out of the normal range\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "HE",
+            "name": "Water Supply Wrong Connection Failure",
+            "detection_rules": "• if the threshold value of \"50\" has been exceeded on the cold side valve (when cold option is being selected)\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "tE",
+            "name": "Abnormal Thermistor Reading",
+            "detection_rules": "• if the thermistor is short or open circuit\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E7-1",
+            "name": "Motor CW Rotation Failure",
+            "detection_rules": "• if the motor is short or open ciruit in the CW direction during wash\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E7-2",
+            "name": "Motor CCW Rotation Failure",
+            "detection_rules": "• if the motor is short or open ciruit in the CCW direction during wash\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E7-3",
+            "name": "Motor Spin Rotation Failure",
+            "detection_rules": "• if the motor is short or open ciruit in the CW direction during Spin\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E7-4",
+            "name": "Motor CW/CCW Rotation Failure",
+            "detection_rules": "• if the motor is short or open ciruit in the CW & CCW direction during wash\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E9",
+            "name": "Abnormal Water Leakage Failure",
+            "detection_rules": "• if during wash (not filling) there is no water in the tub\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E1-1",
+            "name": "Drain Filter Failure",
+            "detection_rules": "• if the frequency change rate is low\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "E3",
+            "name": "MEMS Failure",
+            "detection_rules": "• if the mems is not working due to being defected or assembeled wrong\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "Eb-1",
+            "name": "General Motor Failure",
+            "detection_rules": "• if during machine startup for some reason the motor is still rotating and doesn't stop within a minute\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "EA",
+            "name": "Abnormal Water When Dry Failure",
+            "detection_rules": "• if during spin there is water in the tub when it shouldn't\n• the machine tries to automatically rectifies the issue but after 5 trials if it didn’t success, it displays this error\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "CRC",
+            "name": "CRC Mismatch Failure",
+            "detection_rules": "nan"
+        },
+        {
+            "code": "LP",
+            "name": "Low Power Failure",
+            "detection_rules": "• if after power on the voltage level drops below 160v for 5 minutes\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        },
+        {
+            "code": "EE-4",
+            "name": "Water Supply High Temp Failure",
+            "detection_rules": "• if during water filling (hot or warm option is selected), the water temp exceeds the 63 deg threshold\n• the machine tries to rectifies the issue automatically by opening the cold valve after 30 seconds from exceeding the threshold. If it wasn't successful for 2 minutes, this error appears\n• Every 10 minutes, the buzzer will alarm for 10 seconds"
+        }
+    ],
+    "programs": {
+        "Course Group 1": {
+            "1": {
+                "m2_cw_sec": 0.5,
+                "m2_ccw_sec": 0.5
+            },
+            "2": {
+                "m2_cw_sec": 0.8,
+                "m2_ccw_sec": 0.8
+            },
+            "3": {
+                "m2_cw_sec": 1.3,
+                "m2_ccw_sec": 1.3
+            },
+            "4": {
+                "m2_cw_sec": 1.5,
+                "m2_ccw_sec": 1.5
+            }
+        },
+        "Course Group 2": {
+            "1": {
+                "m2_cw_sec": 0.7,
+                "m2_ccw_sec": 0.7
+            },
+            "2": {
+                "m2_cw_sec": 1.0,
+                "m2_ccw_sec": 1.0
+            },
+            "3": {
+                "m2_cw_sec": 1.2,
+                "m2_ccw_sec": 1.2
+            },
+            "4": {
+                "m2_cw_sec": 1.8,
+                "m2_ccw_sec": 1.8
+            }
+        },
+        "Course Group 3": {
+            "1": {
+                "m2_cw_sec": 0.5,
+                "m2_ccw_sec": 0.5
+            },
+            "2": {
+                "m2_cw_sec": 0.5,
+                "m2_ccw_sec": 0.5
+            },
+            "3": {
+                "m2_cw_sec": 0.5,
+                "m2_ccw_sec": 0.5
+            },
+            "4": {
+                "m2_cw_sec": 0.5,
+                "m2_ccw_sec": 0.5
+            }
+        },
+        "Tub Clean": {
+            "1": {
+                "m2_cw_sec": 1.5,
+                "m2_ccw_sec": 1.5
+            }
+        },
+        "Blanket": {
+            "1": {
+                "m2_cw_sec": 0.8,
+                "m2_ccw_sec": 0.8
+            }
+        },
+        "Quick": {
+            "1": {
+                "m2_cw_sec": 0.4,
+                "m2_ccw_sec": 0.4
+            }
+        },
+        "Fragrance Rinse Spin": {
+            "1": {
+                "m2_cw_sec": 0.0,
+                "m2_ccw_sec": 0.0
+            }
+        }
+    }
+}
