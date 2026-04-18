@@ -5,14 +5,14 @@
 ![Hardware-In-the-Loop](https://img.shields.io/badge/Testing-HIL-orange.svg)
 ![Status](https://img.shields.io/badge/Status-Production_Ready-success.svg)
 
-## 📌 Project Overview
+##  Project Overview
 The **SHARP VE BLDC Automated HIL DAQ System** is an enterprise-grade Hardware-In-the-Loop (HIL) testing and validation platform developed to ensure the absolute reliability and safety of the embedded software in industrial washing machines. 
 
 By aggressively sampling 8 critical electrical channels via an NI-DAQ card at 10Hz, the platform translates raw high-voltage signals into a live, interactive logic dashboard. It serves as an uncompromising "Referee," evaluating the machine's state machine against international safety protocols and immediately flagging any deviations, timing violations, or hazardous conditions.
 
 ---
 
-## 🏗️ System Architecture
+##  System Architecture
 
 The software is built on a heavily decoupled architecture, isolating hardware data acquisition from UI rendering and logic evaluation.
 
@@ -51,7 +51,7 @@ graph TD
 
 ---
 
-## 🔄 Washing Machine State Machine
+##  Washing Machine State Machine
 
 The application constantly infers the physical phase of the washing machine without any direct software communication, relying solely on electrical heuristics.
 
@@ -76,7 +76,7 @@ stateDiagram-v2
 
 ---
 
-## 🛡️ Fault Detection & Evaluation (Bug Hunting)
+##  Fault Detection & Evaluation (Bug Hunting)
 
 The system acts as an uncompromising safety protocol validator. Here is an example diagram representing the **E2 (Door Cover Fault)** validation logic:
 
@@ -86,8 +86,8 @@ graph TD
     B -- "NO (IDLE)" --> C[Safe State: No Action Required]
     B -- "YES (WASH / SPIN)" --> D{Did Embedded Code<br/>Deactivate Motor/Pump?}
     
-    D -- "YES (Within margin)" --> E[✅ SUCCESS: Safety Protocol Verified\nLog PASS in Excel]
-    D -- "NO (Kept running)" --> F[❌ CRITICAL ERROR: E2 Fault\nLog BUG in Excel]
+    D -- "YES (Within margin)" --> E[ SUCCESS: Safety Protocol Verified\nLog PASS in Excel]
+    D -- "NO (Kept running)" --> F[ CRITICAL ERROR: E2 Fault\nLog BUG in Excel]
     
     E --> G[Terminate E2 Monitor Flow]
     F --> G
@@ -102,7 +102,7 @@ graph TD
 
 ---
 
-## 🖥️ User Interface Overview
+##  User Interface Overview
 
 The interface is designed with a premium, industrial SCADA aesthetic aimed at reducing operator fatigue during long testing shifts.
 
@@ -112,7 +112,7 @@ The interface is designed with a premium, industrial SCADA aesthetic aimed at re
 
 ---
 
-## 📊 Automated Reporting Engine
+##  Automated Reporting Engine
 
 Upon test completion (Hitting STOP), the engine seamlessly compiles a multi-sheet `.xlsx` file:
 1. `Test Summary`: High-level executive overview (Global PASS/FAIL, Duration, Total Rows, and isolated Failure Reasons/Bugs).
@@ -120,7 +120,7 @@ Upon test completion (Hitting STOP), the engine seamlessly compiles a multi-shee
 
 ---
 
-## ⚙️ Installation & Usage
+##  Installation & Usage
 
 1. **Clone the repository:**
    ```bash
