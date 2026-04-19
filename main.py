@@ -308,21 +308,18 @@ class MainUI(QMainWindow):
         
         self.program_combo = QComboBox()
         self.program_combo.addItems([
-            "Cotton (قطن)",
-            "Eco (توفير - البرنامج الاقتصادي)",
-            "Mix (مختلط)",
-            "Quick Wash (غسيل سريع)",
-            "Wool (صوف)",
-            "Delicate (ملابس ناعمة/حساسة)",
-            "Heavy Duty (ثقيل/شديد الاتساخ)",
-            "Blanket (لحاف)",
+            "Regular (غسيل عادي)",
+            "Quick (سريع)",
+            "Heavy (ثقيل/شديد الاتساخ)",
             "Baby Care (عناية بملابس الأطفال)",
-            "Sportswear (ملابس رياضية)",
+            "Cotton (قطن)",
+            "Delicates (ملابس ناعمة/حساسة)",
+            "Wool (صوف)",
             "Jeans (جينز)",
-            "Drum Clean (تنظيف الحلة)",
-            "Rinse + Spin (شطف وعصر)",
-            "Spin Only (عصر فقط)",
-            "Drain (تصريف المياه فقط)"
+            "Blanket (لحاف)",
+            "Quick Rinse (شطف سريع)",
+            "Sports Wear (ملابس رياضية)",
+            "Tub Clean (تنظيف الحلة)",   # ✅ 12th official program added
         ])
         self.program_combo.currentTextChanged.connect(self.change_program)
         

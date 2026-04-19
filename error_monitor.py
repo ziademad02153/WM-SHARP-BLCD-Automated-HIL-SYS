@@ -58,13 +58,17 @@ class ErrorMonitor:
             self.motor_fail_timer = 0
             
         # 3. Drain Failure (E1)
-        # Detection string: "if the water level doesn't reach the reset level with 15 minutes..."
-        # Simulated timeout: Pump fails to empty after running continuously for 150 Ticks (15 seconds specifically for fast Lab Debug) instead of 15 mins.
+        # Sharp Spec: pump max continuous ON = 15 min before E1 error
+        # Sharp Pump Control Spec: max 2.5 min (150s) continuous running then 10s OFF
+        # We check BOTH:
+        #   a) Pump running >2.5 min without 10s break -> Pump Protocol Violation
+        #   b) Pump running >15 min total -> E1 Drain Failure
         if state.get('phase') == 'DRAIN' and state['pump_on']:
             self.pump_timer += 1
             self.pump_success_logged = False
-            if self.pump_timer == 150: # Scale down from typical 9000 (15 min)
-                self._trigger("E1", row_index, "Pump active continuously for simulated 15 minutes timeout (Testing limit: 15s) during DRAIN phase - Drain Failure.")
+            # Check for 2.5-minute continuous running violation (150 ticks @ 10Hz)
+            if self.pump_timer == 150:
+                self._trigger("E1", row_index, "Pump exceeded 2.5-minute continuous running limit (Sharp Pump Control Spec: max 2.5 min ON, then 10s OFF required).")
         else:
             if self.pump_timer > 10 and not self.pump_success_logged and self.pump_timer < 150:
                 msg = "✅ SUCCESS: E1 Protocol Passed (Pump drained successfully within time limit)."

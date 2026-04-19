@@ -43,19 +43,23 @@ class LogicMonitor(QObject):
                 config = json.load(f)
             
             programs = config.get("programs", {})
+            # ✅ FIXED: Correct mapping per Sharp VE BLDC Excel Spec Sheet
+            # Group 1: Regular, Quick, Baby Care, Quick Rinse
+            # Group 2: Jeans, Cotton, Heavy
+            # Group 3: Wool, Delicates, Sports Wear
             program_to_group = {
-                "Cotton": "Course Group 1",
-                "Regular": "Course Group 1",
-                "Delicates": "Course Group 3",
-                "Wool": "Course Group 3",
-                "Heavy": "Course Group 2",
-                "Jeans": "Course Group 2",
-                "Sports Wear": "Course Group 3",
-                "Baby Care": "Course Group 2",
-                "Quick": "Quick",
-                "Blanket": "Blanket",
-                "Tub Clean": "Tub Clean",
-                "Rinse": "Fragrance Rinse Spin",
+                "Regular":        "Course Group 1",
+                "Quick":          "Course Group 1",
+                "Baby Care":      "Course Group 1",
+                "Quick Rinse":    "Course Group 1",
+                "Jeans":          "Course Group 2",
+                "Cotton":         "Course Group 2",
+                "Heavy":          "Course Group 2",
+                "Wool":           "Course Group 3",
+                "Delicates":      "Course Group 3",
+                "Sports Wear":    "Course Group 3",
+                "Blanket":        "Blanket",
+                "Tub Clean":      "Tub Clean",
                 "Fragrance Rinse Spin": "Fragrance Rinse Spin"
             }
             
@@ -76,23 +80,20 @@ class LogicMonitor(QObject):
             self.log_event.emit(f"Warning: Could not parse JSON timings, using defaults. ({e})")
 
     def set_program(self, ui_program_name, level=1):
-        # UI to Excel Sheet Mapping Layer
+        # ✅ FIXED: UI to Internal Engine Mapping - matches updated dropdown
         program_map = {
-            "Cotton (قطن)": "Cotton",
-            "Eco (توفير - البرنامج الاقتصادي)": "Regular",
-            "Mix (مختلط)": "Regular",
-            "Quick Wash (غسيل سريع)": "Quick",
-            "Wool (صوف)": "Wool",
-            "Delicate (ملابس ناعمة/حساسة)": "Delicates",
-            "Heavy Duty (ثقيل/شديد الاتساخ)": "Heavy",
-            "Blanket (لحاف)": "Blanket",
+            "Regular (غسيل عادي)":              "Regular",
+            "Quick (سريع)":                      "Quick",
+            "Heavy (ثقيل/شديد الاتساخ)":        "Heavy",
             "Baby Care (عناية بملابس الأطفال)": "Baby Care",
-            "Sportswear (ملابس رياضية)": "Sports Wear",
-            "Jeans (جينز)": "Jeans",
-            "Drum Clean (تنظيف الحلة)": "Tub Clean",
-            "Rinse + Spin (شطف وعصر)": "Rinse",
-            "Spin Only (عصر فقط)": "Fragrance Rinse Spin",
-            "Drain (تصريف المياه فقط)": "Fragrance Rinse Spin"
+            "Cotton (قطن)":                      "Cotton",
+            "Delicates (ملابس ناعمة/حساسة)":    "Delicates",
+            "Wool (صوف)":                        "Wool",
+            "Jeans (جينز)":                      "Jeans",
+            "Blanket (لحاف)":                    "Blanket",
+            "Quick Rinse (شطف سريع)":            "Quick Rinse",
+            "Sports Wear (ملابس رياضية)":        "Sports Wear",
+            "Tub Clean (تنظيف الحلة)":           "Tub Clean",
         }
         
         self.internal_program_name = program_map.get(ui_program_name, "Regular")
@@ -183,18 +184,27 @@ class LogicMonitor(QObject):
 
         
     def _check_child_lock(self, door_closed, pump_on):
+        # ✅ FIXED per Sharp Child Lock Specs:
+        # Case A: door closed before 20s → washing continues normally (PASS)
+        # Case B: door still open after 20s → pump activates immediately
         if not door_closed:
             self.door_open_timer += 1
             if self.door_open_timer == 200: # 20 seconds at 10Hz
                 if not pump_on:
-                    msg = f"SAFETY FAIL: Door open for 20s without Pump activation"
+                    msg = f"SAFETY FAIL: Door open >20s - Pump NOT activated (E2 Safety Breach)"
                     self.log_event.emit(msg)
-                    self._record_result("Child Lock", "FAIL", f"Row {self.row_index}: {msg}")
+                    self._record_result("Child Lock (E2)", "FAIL", f"Row {self.row_index}: {msg}")
                 else:
-                    msg = f"SAFETY PASS: Door open for 20s, Pump activated successfully."
+                    msg = f"✅ SAFETY PASS: Door open >20s - Pump activated correctly (Sharp Spec: Case B)"
                     self.log_event.emit(msg)
-                    self._record_result("Child Lock", "PASS", f"Row {self.row_index}: {msg}")
+                    self._record_result("Child Lock (E2)", "PASS", f"Row {self.row_index}: {msg}")
         else:
+            if 0 < self.door_open_timer < 200:
+                # Door was opened then closed before 20s - Sharp Spec Case A: continue normally
+                elapsed = round(self.door_open_timer / 10, 1)
+                msg = f"✅ SAFETY PASS: Door opened then closed after {elapsed}s (<20s) - Machine continues normally (Sharp Spec: Case A)"
+                self.log_event.emit(msg)
+                self._record_result("Child Lock (E2) Case A", "PASS", f"Row {self.row_index}: {msg}")
             self.door_open_timer = 0
             
     def _check_weight_detection(self, cw_on, ccw_on):
