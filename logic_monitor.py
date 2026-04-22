@@ -1,12 +1,15 @@
 import json
 import logging
+import os
 from PyQt5.QtCore import QObject, pyqtSignal
 from error_monitor import ErrorMonitor
+from sequence_validator import SequenceValidator
 
 class LogicMonitor(QObject):
     log_event = pyqtSignal(str) # Emits string messages to UI log
     test_result = pyqtSignal(dict) # Emits structured test results for Excel
     phase_changed = pyqtSignal(str) # Emits live phase for UI Dashboard
+    validation_status = pyqtSignal(dict) # Forwards SequenceValidator status
     
     def __init__(self):
         super().__init__()
@@ -32,6 +35,8 @@ class LogicMonitor(QObject):
         
         # Sub-modules
         self.error_monitor = ErrorMonitor(self.log_event.emit, self._record_result_proxy)
+        self.sequence_validator = SequenceValidator(self.log_event.emit, self._record_result_proxy)
+        self.sequence_validator.validation_status.connect(self.validation_status.emit)
         
     def _record_result_proxy(self, name, status, evidence):
         self._record_result(name, status, evidence)
@@ -102,6 +107,9 @@ class LogicMonitor(QObject):
         self._load_json_rules()
         self.log_event.emit(f"UI Route: [{ui_program_name}] -> Engine parsing: [{self.internal_program_name}] Level {level}")
         
+        # Configure Sequence Validator
+        self.sequence_validator.set_program(self.internal_program_name, f"LEV-{level}")
+        
     def process_row(self, data):
         self.row_index += 1
         
@@ -140,6 +148,9 @@ class LogicMonitor(QObject):
         
         # 2. Global Error Fault Tree evaluate
         self.error_monitor.evaluate_state(self.row_index, state, self.history)
+
+        # 3. Sequence Validation
+        self.sequence_validator.evaluate_state(self.current_phase)
 
     def _update_phase(self, state):
         old_phase = self.current_phase

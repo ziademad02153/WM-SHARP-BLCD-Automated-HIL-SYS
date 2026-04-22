@@ -49,46 +49,31 @@ class DAQHandler(QObject):
         
         if self.simulate:
             if self.ticks <= 72:
-                # Perfect Weight Detection Pattern
+                # 1. Weight Detection Pattern (0-7.2s)
                 cycle_tick = (self.ticks - 1) % 18
-                if cycle_tick < 9:
-                    ccw_val = 5.0 if cycle_tick < 3 else 0.0
-                    cw_val = 0.0
-                else:
-                    cw_val = 5.0 if (cycle_tick - 9) < 3 else 0.0
-                    ccw_val = 0.0
-                
-                data = [
-                    0.0, # Cold_V
-                    0.0, # Hot_V
-                    0.0, # Pump
-                    0.0, # Clutch
-                    cw_val, # Motor_CW
-                    ccw_val, # Motor_CCW
-                    5.0, # Door (usually 5V/Closed)
-                    0.0  # Buzzer
-                ]
+                cw_val = 5.0 if cycle_tick < 3 else 0.0
+                ccw_val = 5.0 if 9 <= cycle_tick < 12 else 0.0
+                data = [0.0, 0.0, 0.0, 0.0, cw_val, ccw_val, 5.0, 0.0]
+            elif self.ticks <= 200:
+                # 2. Water Fill Phase (7.2s - 20s)
+                data = [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0] # Cold Valve ON
+            elif self.ticks <= 500:
+                # 3. Wash Phase (20s - 50s)
+                cycle_tick = (self.ticks % 20)
+                motor_on = 5.0 if cycle_tick < 10 else 0.0
+                data = [0.0, 0.0, 0.0, 0.0, motor_on, 0.0, 5.0, 0.0]
             else:
-                # Baseline for normal testing
-                pump_val = 5.0 if self.ticks > 100 else random.choices([0.0, 5.0], weights=[0.9, 0.1])[0]
-                
-                data = [
-                    random.uniform(0, 5), # Cold_V
-                    0.0, # Hot_V
-                    pump_val, # Pump (Hangs permanently ON after 10s to force E1 test)
-                    0.0, # Clutch
-                    random.choices([0.0, 5.0], weights=[0.8, 0.2])[0], # Motor_CW
-                    random.choices([0.0, 5.0], weights=[0.8, 0.2])[0], # Motor_CCW
-                    random.choices([0.0, 5.0], weights=[0.1, 0.9])[0], # Door 
-                    random.choices([0.0, 5.0], weights=[0.95, 0.05])[0]  # Buzzer
-                ]
+                # 4. End / Idle
+                data = [0.0]*8
+                data[6] = 5.0 # Door closed
         else:
             try:
                 data = self.task.read()
                 if not isinstance(data, list):
                     data = [data] * 8
             except Exception as e:
-                self.error_occurred.emit(f"Read Error: {e}")
+                self.error_occurred.emit(f"🔴 HARDWARE CRITICAL ERROR: {e}")
+                # Keep returning zeros to reflect actual loss of signal
                 data = [0.0]*8
         
         self.data_ready.emit(data)

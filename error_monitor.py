@@ -13,90 +13,118 @@ class ErrorMonitor:
         self.pump_timer = 0
         self.motor_fail_timer = 0
         self.water_supply_timer = 0
+        self.overflow_timer = 0
+        self.motor_stuck_timer = 0
+        
+        # Success logging flags
         self.e2_safe_logged = False
         self.pump_success_logged = False
         self.water_success_logged = False
         
     def _load_config(self):
-        if not os.path.exists('wm_config.json'):
-            self.log_callback("ErrorMonitor: wm_config.json not found! Please run extract_json.py first.")
-            return
+        # Prefer sharp_spec.json as the master knowledge base
+        spec_path = 'sharp_spec.json'
+        if not os.path.exists(spec_path):
+            self.log_callback(f"ErrorMonitor: {spec_path} not found! Falling back to wm_config.json")
+            spec_path = 'wm_config.json'
             
-        with open('wm_config.json', 'r', encoding='utf-8') as f:
-            config = json.load(f)
-            self.errors_database = config.get("errors", [])
-            self.log_callback(f"ErrorMonitor Loaded: {len(self.errors_database)} Global Error Rules.")
+        try:
+            with open(spec_path, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+                self.errors_database = config.get("errors", [])
+                self.log_callback(f"ErrorMonitor: Loaded {len(self.errors_database)} error rules from {spec_path}")
+        except Exception as e:
+            self.log_callback(f"ErrorMonitor Load Error: {e}")
 
     def evaluate_state(self, row_index, state, history):
         """
-        state dict: {'door_closed', 'pump_on', 'cw_on', 'ccw_on', 'buzzer_on'}
-        Check basic fault trees mapped from the JSON database
+        state dict: {
+            'door_closed', 'pump_on', 'cw_on', 'ccw_on', 
+            'cold_on', 'hot_on', 'clutch_on', 'buzzer_on',
+            'phase', 'motor_rpm', 'motor_voltage'
+        }
         """
         
         # 1. Lid Opening Failure (E2) 
-        # Detection string: "if the lid is opened during delay start, wash, rinse and spin processes..."
-        if not state['door_closed'] and (state.get('phase') in ['WASH', 'SPIN', 'WATER_FILL']):
-            if state['cw_on'] or state['ccw_on'] or state['pump_on']:
-                self._trigger("E2", row_index, "Lid opened while machine processes are active (Motor or Pump).")
+        # Sharp: Lid opened during process (WASH/RINSE/SPIN)
+        if not state['door_closed'] and (state.get('phase') in ['WASH', 'RINSE', 'SPIN']):
+            # If motor or pump still running while door open -> Fault
+            if state['cw_on'] or state['ccw_on'] or state['pump_on'] or state.get('motor_rpm', 0) > 10:
+                self._trigger("E2", row_index, f"Lid opened while machine active! Phase: {state.get('phase')}. Motor RPM: {state.get('motor_rpm')}")
                 self.e2_safe_logged = False
             else:
                 if not self.e2_safe_logged:
-                    msg = "✅ SUCCESS: E2 Safety Protocol Verified (Motor & Pump cleanly deactivated)."
-                    self.log_callback(msg)
-                    self.record_callback("E2 Safety Protocol", "PASS", f"Row {row_index}: {msg}")
+                    self.log_callback("✅ SUCCESS: E2 Safety Protocol Verified (Stopped correctly on lid open).")
+                    self.record_callback("E2 Safety", "PASS", f"Row {row_index}: Machine stopped on door open.")
                     self.e2_safe_logged = True
         else:
             self.e2_safe_logged = False
 
-        # 2. General Motor Failure (Eb-1)
-        # Detection string: "if during machine startup for some reason the motor is still rotating and doesn't stop within a minute..."
-        if state['cw_on'] or state['ccw_on']:
-            self.motor_fail_timer += 1
-            if self.motor_fail_timer > 600: # 60 seconds at 10Hz
-                self._trigger("Eb-1", row_index, "Motor rotating continuously for > 60s without pause.")
+        # 2. General Motor / Stuck Rotation (Eb-1)
+        # Sharp: Motor rotates continuously > 1 min at startup or when it should be idle
+        if (state.get('phase') in ['IDLE', 'PAUSE']) and (state['cw_on'] or state['ccw_on'] or state.get('motor_rpm', 0) > 5):
+            self.motor_stuck_timer += 1
+            if self.motor_stuck_timer > 600: # 60s at 10Hz
+                self._trigger("Eb-1", row_index, "Motor rotating during IDLE/PAUSE for > 60 seconds.")
         else:
-            self.motor_fail_timer = 0
+            self.motor_stuck_timer = 0
             
         # 3. Drain Failure (E1)
-        # Sharp Spec: pump max continuous ON = 15 min before E1 error
-        # Sharp Pump Control Spec: max 2.5 min (150s) continuous running then 10s OFF
-        # We check BOTH:
-        #   a) Pump running >2.5 min without 10s break -> Pump Protocol Violation
-        #   b) Pump running >15 min total -> E1 Drain Failure
+        # Sharp: 15 min total limit, or 2.5 min continuous running violation
         if state.get('phase') == 'DRAIN' and state['pump_on']:
             self.pump_timer += 1
             self.pump_success_logged = False
-            # Check for 2.5-minute continuous running violation (150 ticks @ 10Hz)
-            if self.pump_timer == 150:
-                self._trigger("E1", row_index, "Pump exceeded 2.5-minute continuous running limit (Sharp Pump Control Spec: max 2.5 min ON, then 10s OFF required).")
+            # Check for 2.5-minute continuous running violation (150s = 1500 ticks @ 10Hz?)
+            # Adjusting to 150 ticks = 15s for faster testing demonstration, should be 1500 for real
+            if self.pump_timer == 1500: 
+                self._trigger("E1", row_index, "Pump exceeded 150s continuous run (Sharp Spec: 2.5 min ON, 10s OFF required).")
         else:
-            if self.pump_timer > 10 and not self.pump_success_logged and self.pump_timer < 150:
-                msg = "✅ SUCCESS: E1 Protocol Passed (Pump drained successfully within time limit)."
-                self.log_callback(msg)
-                self.record_callback("E1 Protocol", "PASS", f"Row {row_index}: {msg}")
-                self.pump_success_logged = True
             self.pump_timer = 0
             
         # 4. Water Supply Failure (E5)
+        # Sharp: 20 min limit
         if state.get('phase') == 'WATER_FILL' and (state.get('cold_on') or state.get('hot_on')):
             self.water_supply_timer += 1
-            self.water_success_logged = False
-            if self.water_supply_timer == 200: # 200 Ticks = 20s (simulate 20 mins)
-                self._trigger("E5", row_index, "Water valves open continuously for simulated 20 minutes (Testing limit: 20s) during FILL phase - Water Supply Failure.")
+            if self.water_supply_timer == 12000: # 20 mins = 1200s = 12000 ticks @ 10Hz
+                self._trigger("E5", row_index, "Water supply timed out (> 20 minutes) during FILL phase.")
         else:
-            if self.water_supply_timer > 10 and not self.water_success_logged and self.water_supply_timer < 200:
-                msg = "✅ SUCCESS: E5 Protocol Passed (Water filled successfully within time limit)."
-                self.log_callback(msg)
-                self.record_callback("E5 Protocol", "PASS", f"Row {row_index}: {msg}")
-                self.water_success_logged = True
             self.water_supply_timer = 0
             
-        # 5. Motor Short Circuit / Conflicting Directions (E7-4)
-        if state.get('cw_on') and state.get('ccw_on'):
-            self._trigger("E7-4", row_index, "Motor CW and CCW are ON simultaneously indicating hardware short circuit.")
+        # 5. Overflow Failure (E6-1)
+        # Sharp: Inlet ON + Pump ON during overflow condition
+        if (state.get('cold_on') or state.get('hot_on')) and state['pump_on']:
+            self.overflow_timer += 1
+            if self.overflow_timer > 100: # 10 seconds of overlap
+                self._trigger("E6-1", row_index, "Overflow Detected: Inlets AND Pump active simultaneously for > 10s.")
+        else:
+            self.overflow_timer = 0
+
+        # 6. Abnormal Water when Dry (EA)
+        # Sharp: Water in tub (Pump activates) during SPIN phase
+        if state.get('phase') == 'SPIN' and state['pump_on']:
+            # Pump should only run at start of spin, not during the high RPM phase
+            if state.get('motor_rpm', 0) > 200:
+                self._trigger("EA", row_index, "Abnormal water detected during High-Speed Spin (Pump activated).")
+
+        # 7. Motor Phase / Direction Failures (E7 series)
+        if state.get('phase') == 'WASH':
+            # Motor Short (E7-4)
+            if state.get('cw_on') and state.get('ccw_on'):
+                self._trigger("E7-4", row_index, "Motor CW and CCW ON simultaneously (Hardware Short Circuit).")
+            
+            # Rotation Failures (Requires expected direction from sequence)
+            # If sequence says CW and RPM = 0 -> E7-1
+            # If sequence says CCW and RPM = 0 -> E7-2
 
     def _trigger(self, code, row_index, evidence):
         name = next((e["name"] for e in self.errors_database if e["code"] == code), "Unknown Error")
         msg = f"SECURITY FAULT {code} [{name}]: {evidence}"
         self.log_callback(msg)
         self.record_callback(f"Error Check ({code})", "FAIL", f"Row {row_index}: {msg}")
+
+    def reset_timers(self):
+        self.pump_timer = 0
+        self.motor_fail_timer = 0
+        self.water_supply_timer = 0
+        self.overflow_timer = 0
+        self.motor_stuck_timer = 0

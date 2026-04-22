@@ -197,6 +197,7 @@ class MainUI(QMainWindow):
         self.daq.error_occurred.connect(self.on_daq_error)
         self.logic_mon.log_event.connect(self.add_log)
         self.logic_mon.phase_changed.connect(self.update_phase_display)
+        self.logic_mon.validation_status.connect(self.update_validation_display)
         
     def setup_ui(self):
         central = QWidget()
@@ -242,6 +243,25 @@ class MainUI(QMainWindow):
             cards_layout.addWidget(card)
         cards_group.setLayout(cards_layout)
         main_layout.addWidget(cards_group, stretch=1)
+
+        # SEQUENCE VALIDATION STATUS
+        val_group = QGroupBox("SEQUENCE VALIDATION STATUS")
+        val_layout = QHBoxLayout()
+        
+        self.expected_phase_label = QLabel("EXPECTED: ---")
+        self.expected_phase_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #4FC3F7; background-color: #111111; padding: 5px; border-radius: 3px;")
+        
+        self.countdown_label = QLabel("⏳ --:--")
+        self.countdown_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #FFEB3B; background-color: #111111; padding: 5px; border-radius: 3px;")
+        
+        self.seq_status_label = QLabel("STATUS: IDLE")
+        self.seq_status_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #9E9E9E; background-color: #111111; padding: 5px; border-radius: 3px;")
+        
+        val_layout.addWidget(self.expected_phase_label, stretch=2)
+        val_layout.addWidget(self.countdown_label, stretch=1)
+        val_layout.addWidget(self.seq_status_label, stretch=1)
+        val_group.setLayout(val_layout)
+        main_layout.addWidget(val_group)
         
         graph_group = QGroupBox("LIVE TELEMETRY (OSCILLOSCOPE)")
         graph_layout = QVBoxLayout()
@@ -360,6 +380,25 @@ class MainUI(QMainWindow):
         self.phase_label.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color}; background-color: #1a1a1a; border: 1px solid #444444; border-radius: 4px; padding: 8px;")
         self.phase_label.setText(f"PHASE: {phase}")
 
+    def update_validation_display(self, status_dict):
+        exp = status_dict.get("expected_phase", "---")
+        time_left = status_dict.get("time_left", 0)
+        status = status_dict.get("status", "IDLE")
+        
+        mins = int(time_left // 60)
+        secs = int(time_left % 60)
+        
+        self.expected_phase_label.setText(f"EXPECTED: {exp}")
+        self.countdown_label.setText(f"⏳ {mins:02d}:{secs:02d}")
+        self.seq_status_label.setText(f"STATUS: {status}")
+        
+        if status == "FAIL":
+            self.seq_status_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #FF5252; background-color: #111111; padding: 5px; border-radius: 3px; border: 1px solid #FF5252;")
+        elif status == "RUNNING":
+            self.seq_status_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #4CAF50; background-color: #111111; padding: 5px; border-radius: 3px;")
+        else:
+            self.seq_status_label.setStyleSheet("font-size: 16px; font-weight: bold; color: #9E9E9E; background-color: #111111; padding: 5px; border-radius: 3px;")
+
     def update_timer_display(self):
         if self.is_recording and self.test_start_time:
             elapsed = int((datetime.datetime.now() - self.test_start_time).total_seconds())
@@ -402,6 +441,10 @@ class MainUI(QMainWindow):
             curve.setData([], [])
             
         self.add_log("System initialization complete. Recording started...")
+        
+        # Ensure validator knows the selected program
+        self.change_program(self.program_combo.currentText())
+        
         self.daq.start()
 
     def stop_recording(self):
