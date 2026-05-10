@@ -1,6 +1,5 @@
 import nidaqmx
 from PyQt5.QtCore import QObject, pyqtSignal, QTimer
-import random
 
 class DAQHandler(QObject):
     data_ready = pyqtSignal(list)
@@ -14,9 +13,12 @@ class DAQHandler(QObject):
         self.timer = QTimer()
         self.timer.timeout.connect(self.read_data)
         self.task = None
+        # 7 Channels:
+        # AI0=Cold_V, AI1=Hot_V, AI2=Pump, AI3=Softener,
+        # AI4=GearMotor, AI5=Motor_RPM, AI6=Door
         self.channels = [
-            'Dev1/ai0', 'Dev1/ai1', 'Dev1/ai2', 'Dev1/ai3', 
-            'Dev1/ai4', 'Dev1/ai5', 'Dev1/ai6', 'Dev1/ai7'
+            'Dev1/ai0', 'Dev1/ai1', 'Dev1/ai2',
+            'Dev1/ai3', 'Dev1/ai4', 'Dev1/ai5', 'Dev1/ai6'
         ]
 
     def start(self):
@@ -27,7 +29,7 @@ class DAQHandler(QObject):
                 self.task = nidaqmx.Task()
                 for ch in self.channels:
                     self.task.ai_channels.add_ai_voltage_chan(ch)
-                self.timer.start(100) # 10Hz
+                self.timer.start(100)  # 10Hz
             except Exception as e:
                 self.error_occurred.emit(f"DAQ Error: {e}. Falling back to Simulation.")
                 self.simulate = True
@@ -43,37 +45,38 @@ class DAQHandler(QObject):
             self.task = None
 
     def read_data(self):
-        if not self.running: return
-        
+        if not self.running:
+            return
+
         self.ticks += 1
-        
+
         if self.simulate:
-            if self.ticks <= 72:
-                # 1. Weight Detection Pattern (0-7.2s)
-                cycle_tick = (self.ticks - 1) % 18
-                cw_val = 5.0 if cycle_tick < 3 else 0.0
-                ccw_val = 5.0 if 9 <= cycle_tick < 12 else 0.0
-                data = [0.0, 0.0, 0.0, 0.0, cw_val, ccw_val, 5.0, 0.0]
-            elif self.ticks <= 200:
-                # 2. Water Fill Phase (7.2s - 20s)
-                data = [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0, 0.0] # Cold Valve ON
+            # Format: [Cold_V, Hot_V, Softener, Pump, GearMotor, Motor_RPM, Door]
+            if self.ticks <= 200:
+                # 1. Water Fill (0s-20s): Cold valve ON, RPM=0
+                data = [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0]
             elif self.ticks <= 500:
-                # 3. Wash Phase (20s - 50s)
-                cycle_tick = (self.ticks % 20)
-                motor_on = 5.0 if cycle_tick < 10 else 0.0
-                data = [0.0, 0.0, 0.0, 0.0, motor_on, 0.0, 5.0, 0.0]
+                # 2. Wash (20s-50s): BLDC running ~300RPM, relays off
+                rpm_sim = 1.5  # Simulated voltage representing ~300 RPM
+                data = [0.0, 0.0, 0.0, 0.0, 0.0, rpm_sim, 5.0]
+            elif self.ticks <= 560:
+                # 3. Drain (50s-56s): Pump ON (index 3)
+                data = [0.0, 0.0, 0.0, 5.0, 0.0, 0.5, 5.0]
+            elif self.ticks <= 800:
+                # 4. Spin (56s-80s): GearMotor ON, RPM rising to max ~700
+                spin_progress = min((self.ticks - 560) / 240, 1.0)
+                rpm_sim = spin_progress * 3.5  # Simulated voltage representing 0-700 RPM
+                data = [0.0, 0.0, 0.0, 0.0, 5.0, rpm_sim, 5.0]
             else:
-                # 4. End / Idle
-                data = [0.0]*8
-                data[6] = 5.0 # Door closed
+                # 5. End / Idle
+                data = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0]
         else:
             try:
                 data = self.task.read()
                 if not isinstance(data, list):
-                    data = [data] * 8
+                    data = [data] * 7
             except Exception as e:
                 self.error_occurred.emit(f"🔴 HARDWARE CRITICAL ERROR: {e}")
-                # Keep returning zeros to reflect actual loss of signal
-                data = [0.0]*8
-        
+                data = [0.0] * 7
+
         self.data_ready.emit(data)

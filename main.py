@@ -179,8 +179,8 @@ class MainUI(QMainWindow):
             }
         """)
 
-        self.channels = ["Cold_V", "Hot_V", "Pump", "Clutch", "Motor_CW", "Motor_CCW", "Door", "Buzzer"]
-        self.icons = ["fa5s.snowflake", "fa5s.fire", "fa5s.tint", "fa5s.cogs", "fa5s.redo", "fa5s.undo", "fa5s.door-closed", "fa5s.bell"]
+        self.channels = ["Cold_V", "Hot_V", "Softener", "Pump", "GearMotor", "Motor_RPM", "Door"]
+        self.icons = ["fa5s.snowflake", "fa5s.fire", "fa5s.flask", "fa5s.tint", "fa5s.cog", "fa5s.tachometer-alt", "fa5s.door-closed"]
         
         self.raw_data_log = []
         self.is_recording = False

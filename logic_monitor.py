@@ -26,6 +26,7 @@ class LogicMonitor(QObject):
         self.current_phase = 'IDLE'
         
         self.VOLTAGE_THRESHOLD = 3.0
+        self.RPM_SCALE_FACTOR = 200.0  # Placeholder: 1V = 200 RPM (to be calibrated in lab)
         
         # Dynamic program rules
         self.current_program = "Regular"
@@ -44,6 +45,9 @@ class LogicMonitor(QObject):
         
     def _load_json_rules(self):
         try:
+            if not os.path.exists('wm_config.json'):
+                self.log_event.emit("[Info] wm_config.json not found, using sharp_spec.json for all timing rules.")
+                return
             with open('wm_config.json', 'r', encoding='utf-8') as f:
                 config = json.load(f)
             
@@ -113,24 +117,24 @@ class LogicMonitor(QObject):
     def process_row(self, data):
         self.row_index += 1
         
-        cold, hot, pump, clutch, cw, ccw, door, buzzer = data[2:]
+        cold, hot, softener, pump, gearmotor, motor_rpm, door = data[2:]
         
         door_closed = door > self.VOLTAGE_THRESHOLD
         pump_on = pump > self.VOLTAGE_THRESHOLD
-        cw_on = cw > self.VOLTAGE_THRESHOLD
-        ccw_on = ccw > self.VOLTAGE_THRESHOLD
-        buzzer_on = buzzer > self.VOLTAGE_THRESHOLD
+        gearmotor_on = gearmotor > self.VOLTAGE_THRESHOLD
+        softener_on = softener > self.VOLTAGE_THRESHOLD
         cold_on = cold > self.VOLTAGE_THRESHOLD
         hot_on = hot > self.VOLTAGE_THRESHOLD
+        rpm_value = motor_rpm * self.RPM_SCALE_FACTOR  # Convert voltage to RPM
 
         temp_state = {
             "door_closed": door_closed, 
             "pump_on": pump_on,
-            "cw_on": cw_on, 
-            "ccw_on": ccw_on, 
-            "buzzer_on": buzzer_on,
+            "gearmotor_on": gearmotor_on,
+            "softener_on": softener_on,
             "cold_on": cold_on,
-            "hot_on": hot_on
+            "hot_on": hot_on,
+            "rpm": rpm_value
         }
         
         self._update_phase(temp_state)
@@ -144,7 +148,6 @@ class LogicMonitor(QObject):
 
         # 1. Native Checks
         self._check_child_lock(door_closed, pump_on)
-        self._check_weight_detection(cw_on, ccw_on)
         
         # 2. Global Error Fault Tree evaluate
         self.error_monitor.evaluate_state(self.row_index, state, self.history)
@@ -155,42 +158,41 @@ class LogicMonitor(QObject):
     def _update_phase(self, state):
         old_phase = self.current_phase
         
+        # IDLE: waiting for water or motor
         if self.current_phase == 'IDLE':
-            if state['cw_on'] or state['ccw_on']:
-                self.current_phase = 'WEIGHT_DETECT'
-            elif state['cold_on'] or state['hot_on']:
-                self.current_phase = 'WATER_FILL'
-                
-        elif self.current_phase == 'WEIGHT_DETECT':
             if state['cold_on'] or state['hot_on']:
                 self.current_phase = 'WATER_FILL'
                 
+        # WATER_FILL: water coming in, wait for it to stop
         elif self.current_phase == 'WATER_FILL':
             if not state['cold_on'] and not state['hot_on']:
-                if state['cw_on'] or state['ccw_on']:
-                    self.current_phase = 'WASH'
-                elif state['pump_on']:
+                if state['pump_on']:
                     self.current_phase = 'DRAIN'
+                else:
+                    self.current_phase = 'WASH'  # Water stopped → washing starts
                     
+        # WASH: motor agitating (gearmotor closed = clutch engaged for agitation)
         elif self.current_phase == 'WASH':
             if state['pump_on']:
                 self.current_phase = 'DRAIN'
             elif state['cold_on'] or state['hot_on']:
                 self.current_phase = 'WATER_FILL'
                 
+        # DRAIN: pump running
         elif self.current_phase == 'DRAIN':
             if not state['pump_on']:
-                if state['cw_on'] or state['ccw_on']:
+                if state['gearmotor_on']:  # GearMotor ON = clutch shifted for SPIN
                     self.current_phase = 'SPIN'
                 elif state['cold_on'] or state['hot_on']:
                     self.current_phase = 'WATER_FILL'
                     
+        # SPIN: gearmotor open = drum spinning freely
         elif self.current_phase == 'SPIN':
-            if not state['cw_on'] and not state['ccw_on'] and not state['pump_on']:
-                 self.current_phase = 'IDLE'
+            if not state['gearmotor_on'] and not state['pump_on']:
+                self.current_phase = 'IDLE'
 
         if old_phase != self.current_phase:
-            self.log_event.emit(f"► System Phase Shift: [{old_phase}] ➡️  [{self.current_phase}]")
+            self.log_event.emit(f"► Phase Shift: [{old_phase}] ➡️  [{self.current_phase}]")
             self.phase_changed.emit(self.current_phase)
 
         
