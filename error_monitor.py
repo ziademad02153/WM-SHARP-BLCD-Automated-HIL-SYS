@@ -114,12 +114,9 @@ class ErrorMonitor:
             self.leak_timer = 0
 
         # 7. Abnormal Water When Dry (EA)
-        if phase == 'SPIN' and not empty and rpm > 100:
-            if not getattr(self, 'ea_error_logged', False):
-                self._trigger("EA", row_index, "Abnormal Water: Water in tub during high-speed spin.")
-                self.ea_error_logged = True
-        else:
-            self.ea_error_logged = False
+        # Sharp Spec: SPIN + (Empty = False) -> Failure
+        if phase == 'SPIN' and not empty and rpm > 50:
+            self._trigger("EA", row_index, "Abnormal Water: Water detected in tub during spin (Check Empty Sensor/Drain Pump).")
 
         # 8. General Motor Failure (Eb-1)
         # If at IDLE/Startup motor rotates > 1 min
@@ -140,6 +137,16 @@ class ErrorMonitor:
         if phase == 'IDLE': self.unbalance_retries = 0
 
     def _trigger(self, code, row_index, evidence):
+        # Prevent spamming the same error multiple times per second
+        last_log_time = getattr(self, '_last_log_time', {})
+        current_time = row_index # Use row index as a proxy for time (10Hz)
+        
+        if code in last_log_time and (current_time - last_log_time[code]) < 50: # 5 second cooldown
+            return
+            
+        self._last_log_time = last_log_time
+        self._last_log_time[code] = current_time
+        
         name = next((e["name"] for e in self.errors_database if e["code"] == code), f"Fault {code}")
         msg = f"🔴 ERROR {code} [{name}]: {evidence}"
         self.log_callback(msg)

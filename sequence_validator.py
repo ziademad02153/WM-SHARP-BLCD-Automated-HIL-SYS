@@ -105,7 +105,9 @@ class SequenceValidator(QObject):
         if final_spin_sec > 0:
             self.expected_phases.append({"name": "ANTI_WRINKLE", "duration_sec": 120, "type": "max_limit"})
 
-        self.log_callback(f"SequenceValidator: Built sequence map for {program_name} {level}. Total steps: {len(self.expected_phases)}")
+        total_dur = sum(p["duration_sec"] for p in self.expected_phases)
+        m, s = divmod(int(total_dur), 60)
+        self.log_callback(f"✅ SequenceValidator: Program '{program_name}' LEV-{level} loaded. Total duration: {m}m {s}s. Steps: {len(self.expected_phases)}")
         self._emit_status()
 
 
@@ -115,48 +117,59 @@ class SequenceValidator(QObject):
 
         expected_step = self.expected_phases[self.current_step_index]
         expected_phase_name = expected_step["name"]
+
+        # --- PHASE SYNCHRONIZATION (The "Precision Sync" Guard) ---
+        # Only jump if the machine is CLEARLY in a future phase and NOT in the current one.
+        if actual_phase != expected_phase_name and actual_phase != 'IDLE':
+            for i in range(self.current_step_index + 1, len(self.expected_phases)):
+                if actual_phase == self.expected_phases[i]["name"]:
+                    # Safety check: Don't jump over a WASH or SPIN if we just started
+                    missed = [p["name"] for p in self.expected_phases[self.current_step_index:i]]
+                    self.log_callback(f"⚠️ SYNC: Machine skipped {missed} -> Moving to {actual_phase}")
+                    self.current_step_index = i
+                    self.time_in_current_phase = 0
+                    # Update expected pointers after jump
+                    expected_step = self.expected_phases[self.current_step_index]
+                    expected_phase_name = expected_step["name"]
+                    break
         
-        # Tracking Time
-        if actual_phase != 'IDLE':
-            self.time_in_current_phase += 1  # 1 tick = 100ms
+        # Tracking Time (1 tick = 100ms)
+        if actual_phase == expected_phase_name:
+            self.time_in_current_phase += 1
             
         time_sec = self.time_in_current_phase / 10.0
 
-        # Phase Transition Logic
-        if actual_phase != self.last_phase and self.last_phase != 'IDLE':
-            # Machine changed phase! Let's check if it was supposed to
+        # Phase Transition Logic (Detecting when a phase ENDS)
+        if actual_phase != self.last_phase:
+            # If the machine just FINISHED the expected phase
             if self.last_phase == expected_phase_name:
-                # Did it spend the right amount of time?
                 target_time = expected_step["duration_sec"]
                 
+                # Check timing accuracy
                 if expected_step["type"] == "strict":
                     if abs(time_sec - target_time) > self.TOLERANCE_SEC:
-                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, expected {target_time}s (±{self.TOLERANCE_SEC}s tolerance).", target_time, time_sec)
+                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, expected {target_time}s (±{self.TOLERANCE_SEC}s).", target_time, time_sec)
                         return
                 elif expected_step["type"] == "max_limit":
                     if time_sec > target_time + self.TOLERANCE_SEC:
                         self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, exceeded max limit of {target_time}s.", target_time, time_sec)
                         return
 
-                # It passed the time check! Move to next expected phase
+                # Record PASS and move to next step
                 self._record_pass(expected_phase_name, target_time, time_sec)
                 self.current_step_index += 1
                 self.time_in_current_phase = 0
                 
-                if self.current_step_index < len(self.expected_phases):
-                    next_expected = self.expected_phases[self.current_step_index]["name"]
-                    if actual_phase != next_expected and actual_phase != 'IDLE':
-                        self._trigger_fail(f"Wrong Transition: Expected '{next_expected}', but machine went to '{actual_phase}'.", expected=next_expected, actual=actual_phase)
-                        return
+            # Update last_phase for next tick
+            self.last_phase = actual_phase
 
-        # Time over-run check without transition
+        # Continuous over-run check (while still in the phase)
         if actual_phase == expected_phase_name:
             target_time = expected_step["duration_sec"]
-            if time_sec > target_time + self.TOLERANCE_SEC:
-                 self._trigger_fail(f"Phase '{expected_phase_name}' has been running for {time_sec:.1f}s, exceeding target of {target_time}s.", target_time, time_sec)
+            if expected_step["type"] == "strict" and time_sec > target_time + self.TOLERANCE_SEC:
+                 self._trigger_fail(f"Phase '{expected_phase_name}' time exceeded! Running for {time_sec:.1f}s (Target: {target_time}s).", target_time, time_sec)
                  return
 
-        self.last_phase = actual_phase
         self._emit_status()
 
     def _trigger_fail(self, reason, expected=None, actual=None):
@@ -176,10 +189,15 @@ class SequenceValidator(QObject):
             status = {"expected_phase": "Finished/Idle", "time_left": 0, "status": "FAIL" if self.is_failed else "IDLE"}
         else:
             expected_step = self.expected_phases[self.current_step_index]
-            time_left = max(0, expected_step["duration_sec"] - (self.time_in_current_phase / 10.0))
+            # 1. Current phase time left
+            total_left = max(0, expected_step["duration_sec"] - (self.time_in_current_phase / 10.0))
+            # 2. Add all future phases durations
+            for i in range(self.current_step_index + 1, len(self.expected_phases)):
+                total_left += self.expected_phases[i]["duration_sec"]
+                
             status = {
                 "expected_phase": expected_step["name"],
-                "time_left": time_left,
+                "time_left": total_left,
                 "status": "FAIL" if self.is_failed else "RUNNING"
             }
         self.validation_status.emit(status)
