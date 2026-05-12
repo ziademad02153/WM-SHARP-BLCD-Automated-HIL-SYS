@@ -39,9 +39,8 @@ class ErrorMonitor:
     def evaluate_state(self, row_index, state, history):
         """
         state dict: {
-            'door_closed', 'pump_on', 'cw_on', 'ccw_on', 
-            'cold_on', 'hot_on', 'clutch_on', 'buzzer_on',
-            'phase', 'motor_rpm', 'motor_voltage'
+            'door_closed', 'pump_on', 'gearmotor_on', 'softener_on',
+            'cold_on', 'hot_on', 'phase', 'rpm'
         }
         """
         
@@ -49,8 +48,8 @@ class ErrorMonitor:
         # Sharp: Lid opened during process (WASH/RINSE/SPIN)
         if not state['door_closed'] and (state.get('phase') in ['WASH', 'RINSE', 'SPIN']):
             # If motor or pump still running while door open -> Fault
-            if state['cw_on'] or state['ccw_on'] or state['pump_on'] or state.get('motor_rpm', 0) > 10:
-                self._trigger("E2", row_index, f"Lid opened while machine active! Phase: {state.get('phase')}. Motor RPM: {state.get('motor_rpm')}")
+            if state.get('pump_on') or state.get('rpm', 0) > 10:
+                self._trigger("E2", row_index, f"Lid opened while machine active! Phase: {state.get('phase')}. Motor RPM: {state.get('rpm')}")
                 self.e2_safe_logged = False
             else:
                 if not self.e2_safe_logged:
@@ -62,7 +61,7 @@ class ErrorMonitor:
 
         # 2. General Motor / Stuck Rotation (Eb-1)
         # Sharp: Motor rotates continuously > 1 min at startup or when it should be idle
-        if (state.get('phase') in ['IDLE', 'PAUSE']) and (state['cw_on'] or state['ccw_on'] or state.get('motor_rpm', 0) > 5):
+        if (state.get('phase') in ['IDLE', 'PAUSE']) and (state.get('rpm', 0) > 5):
             self.motor_stuck_timer += 1
             if self.motor_stuck_timer > 600: # 60s at 10Hz
                 self._trigger("Eb-1", row_index, "Motor rotating during IDLE/PAUSE for > 60 seconds.")
@@ -103,18 +102,12 @@ class ErrorMonitor:
         # Sharp: Water in tub (Pump activates) during SPIN phase
         if state.get('phase') == 'SPIN' and state['pump_on']:
             # Pump should only run at start of spin, not during the high RPM phase
-            if state.get('motor_rpm', 0) > 200:
+            if state.get('rpm', 0) > 200:
                 self._trigger("EA", row_index, "Abnormal water detected during High-Speed Spin (Pump activated).")
 
         # 7. Motor Phase / Direction Failures (E7 series)
-        if state.get('phase') == 'WASH':
-            # Motor Short (E7-4)
-            if state.get('cw_on') and state.get('ccw_on'):
-                self._trigger("E7-4", row_index, "Motor CW and CCW ON simultaneously (Hardware Short Circuit).")
-            
-            # Rotation Failures (Requires expected direction from sequence)
-            # If sequence says CW and RPM = 0 -> E7-1
-            # If sequence says CCW and RPM = 0 -> E7-2
+        # Note: Handled by sequence validator based on RPM now.
+
 
     def _trigger(self, code, row_index, evidence):
         name = next((e["name"] for e in self.errors_database if e["code"] == code), "Unknown Error")

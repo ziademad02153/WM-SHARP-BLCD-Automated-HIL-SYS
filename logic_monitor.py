@@ -26,7 +26,7 @@ class LogicMonitor(QObject):
         self.current_phase = 'IDLE'
         
         self.VOLTAGE_THRESHOLD = 3.0
-        self.RPM_SCALE_FACTOR = 200.0  # Placeholder: 1V = 200 RPM (to be calibrated in lab)
+        self.RPM_SCALE_FACTOR = 1.0  # Hardware (NI MAX / Sensor) already outputs pre-scaled RPM value
         
         # Dynamic program rules
         self.current_program = "Regular"
@@ -117,9 +117,9 @@ class LogicMonitor(QObject):
     def process_row(self, data):
         self.row_index += 1
         
-        cold, hot, softener, pump, gearmotor, motor_rpm, door = data[2:]
+        motor_rpm, cold, hot, softener, gearmotor, empty, pump, door = data[2:]
         
-        door_closed = door > self.VOLTAGE_THRESHOLD
+        door_closed = True # TODO: Revert to (door > self.VOLTAGE_THRESHOLD) when wire is connected
         pump_on = pump > self.VOLTAGE_THRESHOLD
         gearmotor_on = gearmotor > self.VOLTAGE_THRESHOLD
         softener_on = softener > self.VOLTAGE_THRESHOLD

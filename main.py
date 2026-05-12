@@ -65,7 +65,9 @@ class StatusCard(QWidget):
         self.title_label.setAlignment(Qt.AlignCenter)
         self.title_label.setStyleSheet("font-weight: bold; font-size: 13px; color: #00BFFF;")
         
-        self.val_label = QLabel("0.00 V")
+        self.unit = " RPM" if title == "Motor_RPM" else " V"
+        
+        self.val_label = QLabel(f"0.00{self.unit}")
         self.val_label.setAlignment(Qt.AlignCenter)
         self.val_label.setStyleSheet("font-family: Consolas, monospace; font-size: 18px; color: #777777; font-weight: bold;")
 
@@ -84,7 +86,7 @@ class StatusCard(QWidget):
         """)
 
     def update_val(self, val):
-        self.val_label.setText(f"{val:.2f} V")
+        self.val_label.setText(f"{val:.2f}{self.unit}")
         if val > 3.0:
             self.setStyleSheet("""
                 StatusCard { 
@@ -179,10 +181,11 @@ class MainUI(QMainWindow):
             }
         """)
 
-        self.channels = ["Cold_V", "Hot_V", "Softener", "Pump", "GearMotor", "Motor_RPM", "Door"]
-        self.icons = ["fa5s.snowflake", "fa5s.fire", "fa5s.flask", "fa5s.tint", "fa5s.cog", "fa5s.tachometer-alt", "fa5s.door-closed"]
+        self.channels = ["Motor_RPM", "Cold_V", "Hot_V", "Softener", "GearMotor", "Empty", "Pump", "Door"]
+        self.icons = ["fa5s.tachometer-alt", "fa5s.snowflake", "fa5s.fire", "fa5s.flask", "fa5s.cog", "fa5s.minus", "fa5s.tint", "fa5s.door-closed"]
         
         self.raw_data_log = []
+        self.is_recording = False
         self.is_recording = False
         self.test_start_time = None
         self.elapsed_timer = QTimer()
@@ -190,7 +193,7 @@ class MainUI(QMainWindow):
         
         self.setup_ui()
         
-        self.daq = DAQHandler(simulate=True)
+        self.daq = DAQHandler()
         self.logic_mon = LogicMonitor()
         
         self.daq.data_ready.connect(self.on_data_ready)
@@ -322,9 +325,6 @@ class MainUI(QMainWindow):
         ctrl_group = QGroupBox("CONTROL PANEL")
         ctrl_layout = QVBoxLayout()
         
-        self.daq_checkbox = QCheckBox("Enable NI-Hardware DAQ")
-        self.daq_checkbox.setChecked(False)
-        self.daq_checkbox.toggled.connect(self.toggle_daq_mode)
         
         self.program_combo = QComboBox()
         self.program_combo.addItems([
@@ -356,8 +356,6 @@ class MainUI(QMainWindow):
         
         ctrl_layout.addWidget(QLabel("Test Program Protocol:"))
         ctrl_layout.addWidget(self.program_combo)
-        ctrl_layout.addSpacing(15)
-        ctrl_layout.addWidget(self.daq_checkbox)
         ctrl_layout.addSpacing(15)
         ctrl_layout.addWidget(self.btn_start)
         ctrl_layout.addWidget(self.btn_stop)
@@ -406,24 +404,14 @@ class MainUI(QMainWindow):
             minutes, seconds = divmod(remainder, 60)
             self.time_label.setText(f"⏱️ {hours:02d}:{minutes:02d}:{seconds:02d}")
 
-    def toggle_daq_mode(self, checked):
-        if self.is_recording:
-             self.add_log("WARNING: Cannot toggle DAQ mode while execution is in progress!")
-             self.daq_checkbox.setChecked(not checked) 
-             return
-        self.daq.simulate = not checked
-        mode_str = "Hardware DAQ" if checked else "Simulation"
-        self.add_log(f"System switched to {mode_str} Mode.")
-
     def change_program(self, text):
         self.logic_mon.set_program(text, level=1)
 
     def on_daq_error(self, err_msg):
-        self.add_log(err_msg)
-        if "Falling back to Simulation" in err_msg:
-            self.daq_checkbox.blockSignals(True)
-            self.daq_checkbox.setChecked(False)
-            self.daq_checkbox.blockSignals(False)
+        self.add_log(f"⚠️ {err_msg}")
+        if self.is_recording:
+            self.add_log("🛑 Critical DAQ Failure: Auto-saving current test session...")
+            self.stop_recording()
 
     def start_recording(self):
         self.is_recording = True
@@ -467,6 +455,8 @@ class MainUI(QMainWindow):
             self.add_log("Save canceled by Operator.")
 
     def on_data_ready(self, data):
+        data = list(data)
+        
         row_idx = len(self.raw_data_log) + 1
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         
@@ -480,7 +470,9 @@ class MainUI(QMainWindow):
             
         self.time_data.append(row_idx)
         for i, val in enumerate(data):
-            offset_val = val + (i * 10)
+            # Scale Motor_RPM visually for the graph only, so 1000 RPM fits in the 0-10 slot (plots at 10.0)
+            plot_val = val / 100.0 if i == 0 else val
+            offset_val = plot_val + (i * 10)
             self.y_data[i].append(offset_val)
             
         if len(self.time_data) > 300: 

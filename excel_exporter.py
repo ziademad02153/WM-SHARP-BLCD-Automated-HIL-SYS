@@ -8,8 +8,8 @@ class ExcelExporter:
 
     def export(self, raw_data, summary_data):
         columns_raw = [
-            "Row_Index", "Timestamp", "Cold_V", "Hot_V",
-            "Softener", "Pump", "GearMotor", "Motor_RPM", "Door"
+            "Row_Index", "Timestamp", "Motor_RPM", "Cold_V", "Hot_V",
+            "Softener", "GearMotor", "Empty", "Pump", "Door"
         ]
         df_raw = pd.DataFrame(raw_data, columns=columns_raw)
         

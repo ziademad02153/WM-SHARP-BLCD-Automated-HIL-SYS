@@ -1,82 +1,85 @@
 import nidaqmx
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+import nidaqmx.constants
+import threading
+from PyQt5.QtCore import QObject, pyqtSignal
 
 class DAQHandler(QObject):
     data_ready = pyqtSignal(list)
     error_occurred = pyqtSignal(str)
 
-    def __init__(self, simulate=True):
+    def __init__(self):
         super().__init__()
-        self.simulate = simulate
         self.running = False
-        self.ticks = 0
-        self.timer = QTimer()
-        self.timer.timeout.connect(self.read_data)
         self.task = None
-        # 7 Channels:
-        # AI0=Cold_V, AI1=Hot_V, AI2=Pump, AI3=Softener,
-        # AI4=GearMotor, AI5=Motor_RPM, AI6=Door
         self.channels = [
-            'Dev1/ai0', 'Dev1/ai1', 'Dev1/ai2',
-            'Dev1/ai3', 'Dev1/ai4', 'Dev1/ai5', 'Dev1/ai6'
+            'cDAQ1Mod1/ai0', 'cDAQ1Mod1/ai1', 'cDAQ1Mod1/ai2', 'cDAQ1Mod1/ai3',
+            'cDAQ1Mod1/ai4', 'cDAQ1Mod1/ai5', 'cDAQ1Mod1/ai6', 'cDAQ1Mod1/ai7'
         ]
 
     def start(self):
         self.running = True
-        self.ticks = 0
-        if not self.simulate:
-            try:
-                self.task = nidaqmx.Task()
-                for ch in self.channels:
-                    self.task.ai_channels.add_ai_voltage_chan(ch)
-                self.timer.start(100)  # 10Hz
-            except Exception as e:
-                self.error_occurred.emit(f"DAQ Error: {e}. Falling back to Simulation.")
-                self.simulate = True
-                self.timer.start(100)
-        else:
-            self.timer.start(100)
+        try:
+            self.task = nidaqmx.Task()
+            for ch in self.channels:
+                self.task.ai_channels.add_ai_voltage_chan(ch)
+            
+            # Configure hardware timing for 1000 Hz, continuous mode
+            self.task.timing.cfg_samp_clk_timing(
+                rate=1000.0,
+                sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS
+            )
+            
+            self.thread = threading.Thread(target=self._daq_loop, daemon=True)
+            self.thread.start()
+        except Exception as e:
+            self.error_occurred.emit(f"Hardware Connection Error: {e}. Check USB or DAQ Chassis.")
 
     def stop(self):
         self.running = False
-        self.timer.stop()
         if self.task:
-            self.task.close()
+            try:
+                self.task.stop()
+                self.task.close()
+            except:
+                pass
             self.task = None
 
-    def read_data(self):
-        if not self.running:
-            return
-
-        self.ticks += 1
-
-        if self.simulate:
-            # Format: [Cold_V, Hot_V, Softener, Pump, GearMotor, Motor_RPM, Door]
-            if self.ticks <= 200:
-                # 1. Water Fill (0s-20s): Cold valve ON, RPM=0
-                data = [5.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0]
-            elif self.ticks <= 500:
-                # 2. Wash (20s-50s): BLDC running ~300RPM, relays off
-                rpm_sim = 1.5  # Simulated voltage representing ~300 RPM
-                data = [0.0, 0.0, 0.0, 0.0, 0.0, rpm_sim, 5.0]
-            elif self.ticks <= 560:
-                # 3. Drain (50s-56s): Pump ON (index 3)
-                data = [0.0, 0.0, 0.0, 5.0, 0.0, 0.5, 5.0]
-            elif self.ticks <= 800:
-                # 4. Spin (56s-80s): GearMotor ON, RPM rising to max ~700
-                spin_progress = min((self.ticks - 560) / 240, 1.0)
-                rpm_sim = spin_progress * 3.5  # Simulated voltage representing 0-700 RPM
-                data = [0.0, 0.0, 0.0, 0.0, 5.0, rpm_sim, 5.0]
-            else:
-                # 5. End / Idle
-                data = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 5.0]
-        else:
+    def _daq_loop(self):
+        while self.running:
             try:
-                data = self.task.read()
-                if not isinstance(data, list):
-                    data = [data] * 7
-            except Exception as e:
-                self.error_occurred.emit(f"🔴 HARDWARE CRITICAL ERROR: {e}")
-                data = [0.0] * 7
+                # Read 100 samples (takes exactly 0.1 seconds at 1000 Hz hardware timing)
+                data = self.task.read(number_of_samples_per_channel=100, timeout=1.0)
+                
+                # Check structure
+                if not isinstance(data[0], list):
+                    # Edge case if only 1 channel exists, but we have 8
+                    continue
 
-        self.data_ready.emit(data)
+                processed_data = []
+                
+                # 1. Process Motor_RPM (data[0] is ai0 Square Wave Pulse Train)
+                motor_wave = data[0]
+                crossings = 0
+                for i in range(1, len(motor_wave)):
+                    if motor_wave[i-1] < 2.5 and motor_wave[i] >= 2.5:
+                        crossings += 1
+                
+                # Frequency (Hz) = crossings / 0.1 seconds
+                frequency = crossings / 0.1
+                
+                # Formula derived from LabVIEW specs: 40 Hz = 800 RPM
+                rpm = frequency * 20.0
+                processed_data.append(rpm)
+                
+                # 2. Process Analog Channels (ai1 to ai7 DC Voltage)
+                for ch_idx in range(1, 8):
+                    avg_val = sum(data[ch_idx]) / 100.0
+                    processed_data.append(avg_val)
+                    
+                self.data_ready.emit(processed_data)
+                
+            except Exception as e:
+                if self.running:
+                    self.stop()
+                    self.error_occurred.emit(f"🔴 HARDWARE DISCONNECTED: {e}")
+                break
