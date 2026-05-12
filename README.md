@@ -3,141 +3,128 @@
 ![Python](https://img.shields.io/badge/Python-3.8+-blue.svg)
 ![PyQt5](https://img.shields.io/badge/PyQt5-GUI-green.svg)
 ![Hardware-In-the-Loop](https://img.shields.io/badge/Testing-HIL-orange.svg)
-![Status](https://img.shields.io/badge/Status-Production_Ready-success.svg)
+![Status](https://img.shields.io/badge/Status-Industrial_Production_Ready-success.svg)
 
 ##  Project Overview
-The **SHARP VE BLDC Automated HIL DAQ System** is an enterprise-grade Hardware-In-the-Loop (HIL) testing and validation platform developed to ensure the absolute reliability and safety of the embedded software in industrial washing machines. 
+The **SHARP VE BLDC Automated HIL DAQ System** is an industrial-grade Hardware-In-the-Loop (HIL) validation platform specifically engineered for the **Sharp VE BLDC 11kg/13kg** washing machine series. 
 
-By aggressively sampling 8 critical electrical channels via an NI-DAQ card at 10Hz, the platform translates raw high-voltage signals into a live, interactive logic dashboard. It serves as an uncompromising "Referee," evaluating the machine's state machine against international safety protocols and immediately flagging any deviations, timing violations, or hazardous conditions.
+By sampling 8 critical electrical channels via an NI-DAQ card at a high-fidelity 10Hz, the system acts as an automated "Factory Auditor," verifying that the embedded software logic complies with 100% of the industrial timing specifications, safety protocols, and fault-tree responses defined by the Sharp engineering standards.
 
 ---
 
 ##  System Architecture
 
-The software is built on a heavily decoupled architecture, isolating hardware data acquisition from UI rendering and logic evaluation.
+The software follows a **Clean Architecture** pattern, isolating hardware acquisition from the core validation engine and the premium visualization layer.
 
 ```mermaid
 graph TD
-    subgraph Machine[Washing Machine]
-        HW[Washing Machine Hardware]
+    subgraph Machine[Washing Machine Hardware]
+        HW[Sharp VE BLDC Unit]
     end
 
-    subgraph DAQ[Data Acquisition Layer]
-        NI[NI DAQ mx / Simulation Generator]
+    subgraph DAQ[Acquisition Layer]
+        NI[NI DAQ mx Driver / Simulated Telemetry]
     end
     
-    subgraph Core[Core Processing Logic]
-        LM(Logic Monitor & State Machine)
-        EM{Error Monitor & Fault Trees}
+    subgraph Core[Logic Validation Engine]
+        LM(Logic Monitor: Phase State Machine)
+        SV[Sequence Validator: Time-Domain Checks]
+        EM{Error Monitor: Industrial Fault Trees}
     end
     
-    subgraph UI[User Interface]
-        Dashboard[PyQt5 Telemetry Dashboard]
-        Plot[Real-time Oscilloscope]
+    subgraph UI[Premium Dashboard]
+        Dashboard[Real-time SCADA Display]
+        Plot[Live Signal Oscilloscope]
     end
     
-    subgraph Output[Reporting]
-        Excel[Automated Excel Test Report]
+    subgraph Output[Compliance Reporting]
+        Excel[Automated Multi-Sheet Verification Report]
     end
 
     HW -- 8 Analog Channels --> NI
     NI -- 10Hz Signal Array --> LM
-    LM -- Phase Updates --> Dashboard
-    LM -- Signal Telemetry --> Plot
-    LM -- Extracted States --> EM
+    LM -- Phase Tracking --> Dashboard
+    LM -- Standards Matching --> SV
+    LM -- Failure Detection --> EM
     EM -- Fault Alarms --> Dashboard
-    EM -- Final Results --> Excel
+    SV & EM -- Compliance Results --> Excel
 ```
 
 ---
 
-##  Washing Machine State Machine
+##  Enhanced State Machine Logic
 
-The application constantly infers the physical phase of the washing machine without any direct software communication, relying solely on electrical heuristics.
+The engine infers the machine's physical state using high-precision electrical heuristics, now supporting advanced BLDC phases:
 
 ```mermaid
 stateDiagram-v2
     [*] --> IDLE
-    IDLE --> WEIGHT_DETECT : Motor CW/CCW Pulses
-    WEIGHT_DETECT --> WATER_FILL : Valves Open
-    IDLE --> WATER_FILL : Valves Open
+    IDLE --> WEIGHT_DETECT : Motor CW/CCW Pulses (7.2s Sequence)
+    WEIGHT_DETECT --> WATER_FILL : Valves Activated
+    IDLE --> WATER_FILL : Valves Activated
     
-    WATER_FILL --> WASH : Full & Motor Active
-    WATER_FILL --> DRAIN : Pump Active
+    WATER_FILL --> WASH : Fill Complete & Agitation Start
+    WATER_FILL --> DRAIN : Pump Triggered
     
-    WASH --> DRAIN : Pump Active
-    WASH --> WATER_FILL : Refill Triggered
+    WASH --> DRAIN : Pump Triggered
+    WASH --> WATER_FILL : Level Drop / Refill
     
-    DRAIN --> SPIN : Tub Empty & Motor Active
-    DRAIN --> WATER_FILL : Refill Triggered
+    DRAIN --> SPIN_PAUSE : Pump Stopped (150s Clutch Shift)
+    SPIN_PAUSE --> SPIN : Motor Ramp-up
     
-    SPIN --> IDLE : Complete & Power Down
+    SPIN --> IDLE : Power Down
+    IDLE --> ANTI_WRINKLE : Post-Spin Motor Pulsing (120s)
+    ANTI_WRINKLE --> IDLE : Cycle End
 ```
 
 ---
 
-##  Fault Detection & Evaluation (Bug Hunting)
+##  Industrial Fault Tree Library (Sharp Standard)
 
-The system acts as an uncompromising safety protocol validator. Here is an example diagram representing the **E2 (Door Cover Fault)** validation logic:
+The **ErrorMonitor** is now pre-loaded with the complete Sharp failure database, enabling automated bug detection across 10+ critical failure scenarios:
 
-```mermaid
-graph TD
-    A[Signal Received: Door Opened] --> B{Is Machine Active?}
-    B -- "NO (IDLE)" --> C[Safe State: No Action Required]
-    B -- "YES (WASH / SPIN)" --> D{Did Embedded Code<br/>Deactivate Motor/Pump?}
-    
-    D -- "YES (Within margin)" --> E[ SUCCESS: Safety Protocol Verified\nLog PASS in Excel]
-    D -- "NO (Kept running)" --> F[ CRITICAL ERROR: E2 Fault\nLog BUG in Excel]
-    
-    E --> G[Terminate E2 Monitor Flow]
-    F --> G
-```
-
-### Supported Automated Error Detections:
-1. **E2 Cover Door Fault**: Validates if the motherboard successfully triggers an emergency motor shutdown upon door opening.
-2. **E1 Drain Timeout**: Validates if the pump completes the tub-drain sequence within regulatory time limits (15 minutes).
-3. **E5 Water Supply Error**: Ensures water fill times out safely if valves remain open longer than the 20-minute safety threshold.
-4. **Eb-1 Motor Continuous Running**: Prevents catastrophic motor relay fusing by ensuring a single motor pulse never exceeds 60 seconds.
-5. **E7-4 Motor Short Circuit**: Hardware safeguard verifying CW and CCW signals are never simultaneously sent to the inverter.
+| Code | Fault Name | Validation Logic |
+| :--- | :--- | :--- |
+| **E1** | Drain Failure | Triggered if tub level doesn't reset within 15 minutes of pump activity. |
+| **E2** | Lid Safety Fault | Immediate flag if lid is opened while high-speed spin or heating is active. |
+| **E3-2** | Unbalance Failure | Detects if the machine fails to correct load unbalance after 3 refill attempts. |
+| **E5** | Supply Failure | Flagged if target water level isn't reached within 20 minutes of valve opening. |
+| **E6-1** | Overflow Fault | Safety breach if inlet valves and drain pump are active simultaneously for >5 min. |
+| **E7-X** | Motor Rotation | Detects hall-sensor/inverter failures during wash (E7-1) or spin (E7-3). |
+| **E9** | Leakage Fault | Triggered if water level drops unexpectedly during an active wash phase. |
+| **EA** | Abnormal Water | Critical safety check: Water detected in tub during high-speed spin. |
+| **Eb-1** | Motor Relay Stuck | Protects against motor relay fusing by detecting unplanned rotation at IDLE. |
 
 ---
 
-##  User Interface Overview
+##  Dynamic Configuration System
 
-The interface is designed with a premium, industrial SCADA aesthetic aimed at reducing operator fatigue during long testing shifts.
+The system is 100% data-driven. All timing rules, program sequences, and error thresholds are parsed dynamically from `sharp_spec.json`. This allows the platform to support multiple machine variants (11kg vs 13kg) without any code changes.
 
-- **Dynamic Color Legend**: 
-  - `IDLE (Grey)` | `WEIGHT (Orange)` | `WATER FILL (Soft Blue)` | `WASH (Soft Green)` | `DRAIN (Soft Red)` | `SPIN (Purple)`
-- **True-to-Life Oscilloscope**: Graph signals are perfectly anchored to their zero-volt baselines, rendering a clean, mathematically accurate square-wave representation of the digital 5V triggers from the hardware.
+- **12 Sharp BLDC Programs supported** (Regular, Quick, Heavy, Baby Care, etc.)
+- **4 Water Levels per program** with dedicated timing curves.
+- **Strict vs Max-Limit Validation**: Phases are evaluated against rigid factory tolerances.
 
 ---
 
 ##  Automated Reporting Engine
 
-Upon test completion (Hitting STOP), the engine seamlessly compiles a multi-sheet `.xlsx` file:
-1. `Test Summary`: High-level executive overview (Global PASS/FAIL, Duration, Total Rows, and isolated Failure Reasons/Bugs).
-2. `Raw Data Logs`: The granular 10Hz sampling history of every connected channel, enabling micro-second bug tracing.
+Upon hitting **STOP**, the engine generates a professional `.xlsx` compliance report:
+1. **Analysis Summary**: Executive view showing PASS/FAIL status for every phase, with automated technical evidence and timestamps.
+2. **Raw Telemetry**: 10Hz sampling history for deep-dive root cause analysis.
 
 ---
 
-##  Installation & Usage
+##  Installation & Hardware Setup
 
-1. **Clone the repository:**
+1. **Environment Setup:**
    ```bash
-   git clone https://github.com/ziademad02153/WM-SHARP-BLCD-Automated-HIL-SYS.git
-   cd WM-SHARP-BLCD-Automated-HIL-SYS
+   pip install PyQt5 pyqtgraph pandas xlsxwriter nidaqmx qtawesome
    ```
-2. **Install dependencies:**
-   ```bash
-   pip install PyQt5 pyqtgraph pandas openpyxl nidaqmx qtawesome
-   ```
-3. **Execute System Configuration Extraction:**
-   ```bash
-   python extract_json.py
-   ```
-4. **Launch the DAQ Console:**
+2. **Hardware Configuration:** Connect your National Instruments DAQ unit. Channels are mapped according to the **Hardware IO** specs in `sharp_spec.json`.
+3. **Execution:**
    ```bash
    python main.py
    ```
 
-> **Note on Hardware Requirements**: To utilize the physical mode, an active National Instruments DAQ unit must be connected and recognized by the OS via NI-MAX. Otherwise, the software elegantly falls back to the chaotic `Simulation Mode` for logic robustness testing.
+> **Safety Warning**: This system is designed for professional industrial environments. Ensure all high-voltage isolation protocols are followed when connecting the machine signals to the DAQ inputs.

@@ -24,8 +24,12 @@ class LogicMonitor(QObject):
         self.weight_pulse_counter = 0
         self.weight_pulse_start_row = 0
         self.current_phase = 'IDLE'
+        self.drain_count = 0
+        self._prev_pump = False
+        self.leak_timer = 0
+        self.unbalance_retries = 0
         
-        self.VOLTAGE_THRESHOLD = 3.0
+        self.VOLTAGE_THRESHOLD = 2.0  # Lowered to 2.0V since the Softener channel only reaches 2.5V when ON
         self.RPM_SCALE_FACTOR = 1.0  # Hardware (NI MAX / Sensor) already outputs pre-scaled RPM value
         
         # Dynamic program rules
@@ -39,8 +43,8 @@ class LogicMonitor(QObject):
         self.sequence_validator = SequenceValidator(self.log_event.emit, self._record_result_proxy)
         self.sequence_validator.validation_status.connect(self.validation_status.emit)
         
-    def _record_result_proxy(self, name, status, evidence):
-        self._record_result(name, status, evidence)
+    def _record_result_proxy(self, *args, **kwargs):
+        self._record_result(*args, **kwargs)
 
         
     def _load_json_rules(self):
@@ -111,89 +115,157 @@ class LogicMonitor(QObject):
         self._load_json_rules()
         self.log_event.emit(f"UI Route: [{ui_program_name}] -> Engine parsing: [{self.internal_program_name}] Level {level}")
         
-        # Configure Sequence Validator
         self.sequence_validator.set_program(self.internal_program_name, f"LEV-{level}")
         
     def process_row(self, data):
-        self.row_index += 1
-        
-        motor_rpm, cold, hot, softener, gearmotor, empty, pump, door = data[2:]
-        
-        door_closed = True # TODO: Revert to (door > self.VOLTAGE_THRESHOLD) when wire is connected
-        pump_on = pump > self.VOLTAGE_THRESHOLD
-        gearmotor_on = gearmotor > self.VOLTAGE_THRESHOLD
-        softener_on = softener > self.VOLTAGE_THRESHOLD
-        cold_on = cold > self.VOLTAGE_THRESHOLD
-        hot_on = hot > self.VOLTAGE_THRESHOLD
-        rpm_value = motor_rpm * self.RPM_SCALE_FACTOR  # Convert voltage to RPM
+        try:
+            self.row_index += 1
+            
+            motor_rpm, cold, hot, softener, gearmotor, empty, pump, door = data[2:]
+            
+            door_closed = True # TODO: Revert to (door > self.VOLTAGE_THRESHOLD) when wire is connected
+            pump_on = pump > self.VOLTAGE_THRESHOLD
+            gearmotor_on = gearmotor > self.VOLTAGE_THRESHOLD
+            softener_on = softener > self.VOLTAGE_THRESHOLD
+            cold_on = cold > self.VOLTAGE_THRESHOLD
+            hot_on = hot > self.VOLTAGE_THRESHOLD
+            empty_on = empty > self.VOLTAGE_THRESHOLD
+            rpm_value = motor_rpm * self.RPM_SCALE_FACTOR  # Convert voltage to RPM
 
-        temp_state = {
-            "door_closed": door_closed, 
-            "pump_on": pump_on,
-            "gearmotor_on": gearmotor_on,
-            "softener_on": softener_on,
-            "cold_on": cold_on,
-            "hot_on": hot_on,
-            "rpm": rpm_value
-        }
-        
-        self._update_phase(temp_state)
-        temp_state["phase"] = self.current_phase
-        state = temp_state
+            temp_state = {
+                "door_closed": door_closed, 
+                "pump_on": pump_on,
+                "gearmotor_on": gearmotor_on,
+                "softener_on": softener_on,
+                "cold_on": cold_on,
+                "hot_on": hot_on,
+                "empty_on": empty_on,
+                "rpm": rpm_value
+            }
+            
+            self._update_phase(temp_state)
+            temp_state["phase"] = self.current_phase
+            state = temp_state
 
-        self.history.append({"row": self.row_index, **state})
-        
-        if len(self.history) > 500:
-            self.history.pop(0)
+            self.history.append({"row": self.row_index, **state})
+            
+            if len(self.history) > 500:
+                self.history.pop(0)
 
-        # 1. Native Checks
-        self._check_child_lock(door_closed, pump_on)
-        
-        # 2. Global Error Fault Tree evaluate
-        self.error_monitor.evaluate_state(self.row_index, state, self.history)
-
-        # 3. Sequence Validation
-        self.sequence_validator.evaluate_state(self.current_phase)
+            # 1. Logic Sub-Checks
+            self._check_child_lock(door_closed, pump_on)
+            self._check_weight_detection(rpm_value > 10, rpm_value < 5)
+            
+            # 2. Main Validation Sub-modules
+            self.error_monitor.evaluate_state(self.row_index, state, self.history)
+            self.sequence_validator.evaluate_state(self.current_phase)
+            
+        except Exception as e:
+            self.log_event.emit(f"🔴 CRITICAL ENGINE ERROR: {e}")
 
     def _update_phase(self, state):
         old_phase = self.current_phase
+        pump  = state['pump_on']
+        cold  = state['cold_on']
+        hot   = state['hot_on']
+        rpm   = state.get('rpm', 0)
         
-        # IDLE: waiting for water or motor
+        # Track pump state changes to count drain cycles
+        prev_pump = getattr(self, '_prev_pump', False)
+        
+        # Detect falling edge of pump (pump just turned OFF = end of drain)
+        if prev_pump and not pump:
+            self.drain_count += 1
+        self._prev_pump = pump
+
+        # ── STATE MACHINE ────────────────────────────────────────────────
+        # IDLE: nothing active
         if self.current_phase == 'IDLE':
-            if state['cold_on'] or state['hot_on']:
+            if cold or hot:
+                self.drain_count = 0     # reset counter at start of new cycle
                 self.current_phase = 'WATER_FILL'
-                
-        # WATER_FILL: water coming in, wait for it to stop
+            elif rpm > 10:
+                # Motor pulsing without water = Weight Detection
+                self.current_phase = 'WEIGHT_DETECT'
+            elif rpm > 5 and not (pump or cold or hot):
+                # Detected low-speed motor activity at the end (ANTI_WRINKLE)
+                self.current_phase = 'ANTI_WRINKLE'
+
+        # WEIGHT_DETECT: motor pulsing to sense load
+        elif self.current_phase == 'WEIGHT_DETECT':
+            if cold or hot:
+                self.current_phase = 'WATER_FILL'
+            elif rpm < 5 and not (cold or hot or pump):
+                # If it stops for too long without filling, go back to IDLE
+                pass
+
+        # WATER_FILL: valve is open, filling with water
         elif self.current_phase == 'WATER_FILL':
-            if not state['cold_on'] and not state['hot_on']:
-                if state['pump_on']:
+            if not cold and not hot:
+                # Valves closed - decide what comes next
+                if pump:
                     self.current_phase = 'DRAIN'
                 else:
-                    self.current_phase = 'WASH'  # Water stopped → washing starts
-                    
-        # WASH: motor agitating (gearmotor closed = clutch engaged for agitation)
+                    # After first fill → WASH, after subsequent fills → RINSE N
+                    if self.drain_count == 0:
+                        self.current_phase = 'WASH'
+                    else:
+                        self.current_phase = f'RINSE_{self.drain_count}'
+
+        # WASH: motor agitating, no valves, no pump
         elif self.current_phase == 'WASH':
-            if state['pump_on']:
+            if pump:
                 self.current_phase = 'DRAIN'
-            elif state['cold_on'] or state['hot_on']:
+            elif cold or hot:
                 self.current_phase = 'WATER_FILL'
-                
+
+        # RINSE N: same as wash but post-drain cycle
+        elif self.current_phase.startswith('RINSE'):
+            if pump:
+                self.current_phase = 'DRAIN'
+            elif cold or hot:
+                self.current_phase = 'WATER_FILL'
+
         # DRAIN: pump running
         elif self.current_phase == 'DRAIN':
-            if not state['pump_on']:
-                if state['gearmotor_on']:  # GearMotor ON = clutch shifted for SPIN
-                    self.current_phase = 'SPIN'
-                elif state['cold_on'] or state['hot_on']:
+            if not pump:
+                if cold or hot:
+                    # More water coming → another RINSE fill
                     self.current_phase = 'WATER_FILL'
-                    
-        # SPIN: gearmotor open = drum spinning freely
-        elif self.current_phase == 'SPIN':
-            if not state['gearmotor_on'] and not state['pump_on']:
-                self.current_phase = 'IDLE'
+                else:
+                    # End of drain, usually 150s pause before spin
+                    self.current_phase = 'SPIN_PAUSE'
 
+        # SPIN_PAUSE: 150s gap for clutch transition
+        elif self.current_phase == 'SPIN_PAUSE':
+            if rpm > 100:
+                self.current_phase = 'SPIN'
+            elif cold or hot:
+                self.current_phase = 'WATER_FILL'
+            elif pump:
+                self.current_phase = 'DRAIN'
+
+        # SPIN: motor at high RPM
+        elif self.current_phase == 'SPIN':
+            if rpm < 30 and not pump and not cold and not hot:
+                # After high speed spin, go to IDLE (from where ANTI_WRINKLE might start)
+                self.current_phase = 'IDLE'
+            elif cold or hot:
+                self.current_phase = 'WATER_FILL'
+
+        # ANTI_WRINKLE: pulsator only activity after spin (Rinse part2.png)
+        elif self.current_phase == 'ANTI_WRINKLE':
+            if rpm < 5 and not (pump or cold or hot):
+                self.current_phase = 'IDLE'
+            elif pump or cold or hot:
+                self.current_phase = 'IDLE' # Transition if new cycle starts
+
+        # ── LOG PHASE CHANGE ─────────────────────────────────────────────
         if old_phase != self.current_phase:
             self.log_event.emit(f"► Phase Shift: [{old_phase}] ➡️  [{self.current_phase}]")
             self.phase_changed.emit(self.current_phase)
+
+
 
         
     def _check_child_lock(self, door_closed, pump_on):
@@ -277,11 +349,13 @@ class LogicMonitor(QObject):
         phase = idx % 4
         return ['CCW_ON', 'CCW_OFF', 'CW_ON', 'CW_OFF'][phase]
 
-    def _record_result(self, test_name, status, evidence):
+    def _record_result(self, test_name, status, evidence, expected=None, actual=None):
         self.analysis_summary.append({
             "Row_Index": self.row_index,
             "Test_Name": test_name,
             "Status": status,
+            "Expected_Sec": expected if expected is not None else "N/A",
+            "Actual_Sec": actual if actual is not None else "N/A",
             "Technical_Evidence": evidence
         })
         self.test_result.emit(self.analysis_summary[-1])
@@ -292,10 +366,20 @@ class LogicMonitor(QObject):
     def reset(self):
         self.row_index = 0
         self.history.clear()
+        # Note: analysis_summary is NOT cleared here if we want to keep results from multiple programs
+        # in one Excel export. But usually, one 'Start' = one test. 
+        # User wants to switch programs, so we clear it for a clean sheet.
         self.analysis_summary.clear()
+        
         self.door_open_timer = 0
         self.weight_test_active = False
         self.weight_sequence_idx = 0
         self.weight_pulse_counter = 0
         self.weight_pulse_start_row = 0
         self.current_phase = 'IDLE'
+        self.drain_count = 0
+        self._prev_pump = False
+        
+        # Sub-module resets
+        self.error_monitor.reset_timers()
+        self.sequence_validator.reset()

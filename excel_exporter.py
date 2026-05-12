@@ -13,7 +13,7 @@ class ExcelExporter:
         ]
         df_raw = pd.DataFrame(raw_data, columns=columns_raw)
         
-        columns_summary = ["Row_Index", "Test_Name", "Status", "Technical_Evidence"]
+        columns_summary = ["Row_Index", "Test_Name", "Status", "Expected_Sec", "Actual_Sec", "Technical_Evidence"]
         df_summary = pd.DataFrame(summary_data, columns=columns_summary)
 
         with pd.ExcelWriter(self.filename, engine='xlsxwriter') as writer:
@@ -55,23 +55,29 @@ class ExcelExporter:
             
             # --- Write Table Data ---
             start_row = 8
+            header_row = start_row
+            data_start_row = header_row + 1
             
             if total_tests > 0:
                 for row_num in range(total_tests):
                     row_data = df_summary.iloc[row_num]
-                    worksheet_summary.write(start_row + 1 + row_num, 0, row_data['Row_Index'], default_format)
-                    worksheet_summary.write(start_row + 1 + row_num, 1, row_data['Test_Name'], default_format)
+                    curr_row = data_start_row + row_num
+                    
+                    worksheet_summary.write(curr_row, 0, row_data['Row_Index'], default_format)
+                    worksheet_summary.write(curr_row, 1, row_data['Test_Name'], default_format)
                     
                     status = row_data['Status']
                     if status == 'PASS':
-                        worksheet_summary.write(start_row + 1 + row_num, 2, status, pass_format)
+                        worksheet_summary.write(curr_row, 2, status, pass_format)
                     else:
-                        worksheet_summary.write(start_row + 1 + row_num, 2, status, fail_format)
-                        
-                    worksheet_summary.write(start_row + 1 + row_num, 3, row_data['Technical_Evidence'], wrap_format)
+                        worksheet_summary.write(curr_row, 2, status, fail_format)
+                    
+                    worksheet_summary.write(curr_row, 3, row_data['Expected_Sec'], default_format)
+                    worksheet_summary.write(curr_row, 4, row_data['Actual_Sec'], default_format)
+                    worksheet_summary.write(curr_row, 5, row_data['Technical_Evidence'], wrap_format)
                 
-                end_row = start_row + total_tests
-                worksheet_summary.add_table(f'A{start_row+1}:D{end_row+1}', {
+                end_row = data_start_row + total_tests - 1
+                worksheet_summary.add_table(header_row, 0, end_row, 5, {
                     'columns': [{'header': c} for c in df_summary.columns.values],
                     'style': 'Table Style Light 9'
                 })
@@ -80,7 +86,8 @@ class ExcelExporter:
             worksheet_summary.set_column('A:A', 12)
             worksheet_summary.set_column('B:B', 30)
             worksheet_summary.set_column('C:C', 15)
-            worksheet_summary.set_column('D:D', 110) # Very wide for evidence with wrapping
+            worksheet_summary.set_column('D:E', 15)
+            worksheet_summary.set_column('F:F', 110) # Very wide for evidence with wrapping
 
             # Auto fit raw telemetry slightly 
             worksheet_raw = writer.sheets['Raw_Telemetry']

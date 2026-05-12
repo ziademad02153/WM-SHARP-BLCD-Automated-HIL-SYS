@@ -368,13 +368,18 @@ class MainUI(QMainWindow):
     def update_phase_display(self, phase):
         colors = {
             'IDLE': '#9E9E9E',
-            'WEIGHT_DETECT': '#FFB74D',
-            'WATER_FILL': '#4FC3F7',
-            'WASH': '#81C784',
-            'DRAIN': '#E57373',
-            'SPIN': '#9575CD'
+            'WEIGHT_DETECT': '#FFD700', # Gold
+            'WATER_FILL': '#00BFFF',   # Deep Sky Blue
+            'WASH': '#32CD32',         # Lime Green
+            'DRAIN': '#FF4500',        # Orange Red
+            'SPIN_PAUSE': '#FF00FF',   # Magenta (Visual indicator for Clutch shift)
+            'SPIN': '#8A2BE2'          # Blue Violet
         }
-        color = colors.get(phase, '#E0E0E0')
+        # Dynamic check for RINSE_1, RINSE_2, etc.
+        if phase.startswith('RINSE'):
+            color = '#20B2AA' # Light Sea Green
+        else:
+            color = colors.get(phase, '#E0E0E0')
         self.phase_label.setStyleSheet(f"font-size: 18px; font-weight: bold; color: {color}; background-color: #1a1a1a; border: 1px solid #444444; border-radius: 4px; padding: 8px;")
         self.phase_label.setText(f"PHASE: {phase}")
 
@@ -387,7 +392,12 @@ class MainUI(QMainWindow):
         secs = int(time_left % 60)
         
         self.expected_phase_label.setText(f"EXPECTED: {exp}")
-        self.countdown_label.setText(f"⏳ {mins:02d}:{secs:02d}")
+        
+        if exp == "WEIGHT_DETECT":
+            self.countdown_label.setText("⏳ ----") # Match WD.png spec
+        else:
+            self.countdown_label.setText(f"⏳ {mins:02d}:{secs:02d}")
+            
         self.seq_status_label.setText(f"STATUS: {status}")
         
         if status == "FAIL":
@@ -475,10 +485,10 @@ class MainUI(QMainWindow):
             offset_val = plot_val + (i * 10)
             self.y_data[i].append(offset_val)
             
-        if len(self.time_data) > 300: 
-            self.time_data = self.time_data[-300:]
+        if len(self.time_data) > 1000: 
+            self.time_data = self.time_data[-1000:]
             for i in range(8):
-                self.y_data[i] = self.y_data[i][-300:]
+                self.y_data[i] = self.y_data[i][-1000:]
                 
         for i, curve in enumerate(self.curves):
             curve.setData(self.time_data, self.y_data[i])
@@ -498,6 +508,10 @@ class MainUI(QMainWindow):
             
         self.log_list.addItem(item)
         self.log_list.scrollToBottom()
+        
+        # Performance Guard: Limit log history in UI to 500 items to prevent lag
+        if self.log_list.count() > 500:
+            self.log_list.takeItem(0)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

@@ -57,24 +57,45 @@ class DAQHandler(QObject):
 
                 processed_data = []
                 
-                # 1. Process Motor_RPM (data[0] is ai0 Square Wave Pulse Train)
-                motor_wave = data[0]
-                crossings = 0
-                for i in range(1, len(motor_wave)):
-                    if motor_wave[i-1] < 2.5 and motor_wave[i] >= 2.5:
-                        crossings += 1
+                # 1. Process Motor_RPM using a rolling 0.5-second buffer (500 samples)
+                # This guarantees high-resolution frequency calculation even at low RPMs
+                if not hasattr(self, 'motor_buffer'):
+                    self.motor_buffer = []
                 
-                # Frequency (Hz) = crossings / 0.1 seconds
-                frequency = crossings / 0.1
+                self.motor_buffer.extend(data[0])
+                if len(self.motor_buffer) > 500:
+                    self.motor_buffer = self.motor_buffer[-500:]
                 
-                # Formula derived from LabVIEW specs: 40 Hz = 800 RPM
-                rpm = frequency * 20.0
-                processed_data.append(rpm)
+                crossing_indices = []
+                if not hasattr(self, 'last_crossing_state'):
+                    self.last_crossing_state = 'DOWN' # Initial state
+                
+                # Hysteresis thresholds: UP at 3.0V, DOWN at 2.0V to avoid noise jitter
+                for i in range(len(self.motor_buffer)):
+                    val = self.motor_buffer[i]
+                    if self.last_crossing_state == 'DOWN' and val >= 3.0:
+                        self.last_crossing_state = 'UP'
+                        crossing_indices.append(i)
+                    elif self.last_crossing_state == 'UP' and val <= 2.0:
+                        self.last_crossing_state = 'DOWN'
+                
+                if len(crossing_indices) >= 2:
+                    # Calculate exact time between the first and last crossing in the buffer
+                    num_periods = len(crossing_indices) - 1
+                    time_elapsed = (crossing_indices[-1] - crossing_indices[0]) / 1000.0
+                    frequency = num_periods / time_elapsed
+                else:
+                    frequency = 0.0
+                
+                # Washing machine tachometers typically output 6 pulses per revolution.
+                # RPM = (Frequency * 60) / 6 = Frequency * 10.0
+                rpm = frequency * 10.0
+                processed_data.append(round(rpm, 3))  # Round to 3 decimal places
                 
                 # 2. Process Analog Channels (ai1 to ai7 DC Voltage)
                 for ch_idx in range(1, 8):
                     avg_val = sum(data[ch_idx]) / 100.0
-                    processed_data.append(avg_val)
+                    processed_data.append(round(avg_val, 3))  # Round to 3 decimal places
                     
                 self.data_ready.emit(processed_data)
                 
