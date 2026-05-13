@@ -1,3 +1,4 @@
+# SHARP HIL REPORTING MODULE - VERSION 2.1
 import pandas as pd
 import xlsxwriter
 from datetime import datetime
@@ -14,7 +15,7 @@ class ExcelExporter:
         df_raw = pd.DataFrame(raw_data, columns=columns_raw)
         
         columns_summary = ["Row_Index", "Test_Name", "Status", "Expected_Sec", "Actual_Sec", "Technical_Evidence"]
-        df_summary = pd.DataFrame(summary_data, columns=columns_summary)
+        df_summary = pd.DataFrame(summary_data)
 
         with pd.ExcelWriter(self.filename, engine='xlsxwriter') as writer:
             df_raw.to_excel(writer, sheet_name="Raw_Telemetry", index=False)
@@ -24,37 +25,39 @@ class ExcelExporter:
             
             # --- Formats ---
             header_format = workbook.add_format({
-                'bold': True, 'font_size': 14, 
-                'bg_color': '#1E2A38', 'font_color': 'white', 
-                'align': 'center', 'valign': 'vcenter'
+                'bold': True, 'font_size': 16, 
+                'bg_color': '#0052CC', 'font_color': 'white', 
+                'align': 'center', 'valign': 'vcenter',
+                'border': 1
             })
-            wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top'})
-            pass_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100', 'bold': True})
-            fail_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006', 'bold': True})
-            default_format = workbook.add_format({'valign': 'top'})
+            stat_header_format = workbook.add_format({'bold': True, 'font_size': 11, 'bg_color': '#F4F7F9'})
+            wrap_format = workbook.add_format({'text_wrap': True, 'valign': 'top', 'border': 1})
+            pass_format = workbook.add_format({'bg_color': '#C6EFCE', 'font_color': '#006100', 'bold': True, 'border': 1, 'align': 'center'})
+            fail_format = workbook.add_format({'bg_color': '#FFC7CE', 'font_color': '#9C0006', 'bold': True, 'border': 1, 'align': 'center'})
+            default_format = workbook.add_format({'valign': 'top', 'border': 1})
             
             # --- Write Header Stats ---
-            worksheet_summary.merge_range('A1:D1', 'Sharp HIL DAQ Verification Report', header_format)
+            worksheet_summary.merge_range('A1:F1', 'Sharp Automated Software Validation - Execution Report', header_format)
             
             total_tests = len(df_summary)
             pass_count = len(df_summary[df_summary['Status'] == 'PASS'])
             fail_count = len(df_summary[df_summary['Status'] == 'FAIL'])
             current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            worksheet_summary.write('A3', 'Execution Date:', workbook.add_format({'bold': True}))
+            worksheet_summary.write('A3', 'Execution Date:', stat_header_format)
             worksheet_summary.write('B3', current_time)
             
-            worksheet_summary.write('A4', 'Total Verifications:', workbook.add_format({'bold': True}))
+            worksheet_summary.write('A4', 'Total Verifications:', stat_header_format)
             worksheet_summary.write('B4', total_tests)
             
-            worksheet_summary.write('A5', 'Passed Checks:', workbook.add_format({'bold': True}))
-            worksheet_summary.write('B5', pass_count, pass_format)
-            
-            worksheet_summary.write('A6', 'Failed Checks:', workbook.add_format({'bold': True}))
-            worksheet_summary.write('B6', fail_count, fail_format)
+            worksheet_summary.write('A5', 'System Status:', stat_header_format)
+            if fail_count == 0:
+                worksheet_summary.write('B5', 'ALL SYSTEMS PASS', pass_format)
+            else:
+                worksheet_summary.write('B5', f'FAILED ({fail_count} ISSUES)', fail_format)
             
             # --- Write Table Data ---
-            start_row = 8
+            start_row = 7
             header_row = start_row
             data_start_row = header_row + 1
             

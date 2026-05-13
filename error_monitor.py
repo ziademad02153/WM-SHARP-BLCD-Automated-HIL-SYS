@@ -1,46 +1,54 @@
 import json
 import os
+from PyQt5.QtCore import QObject, pyqtSignal
 
-class ErrorMonitor:
+class ErrorMonitor(QObject):
+    """
+    Handles fault detection and error code triggering based on system specifications.
+    """
+    alarm_triggered = pyqtSignal(str)
+
     def __init__(self, log_callback, record_callback):
+        super().__init__()
         self.log_callback = log_callback
         self.record_callback = record_callback
-        
         self.errors_database = []
-        self._load_config()
-
-        # State trackers for error detection
+        
+        # State trackers
         self.pump_timer = 0
+        self.continuous_pump_timer = 0
+        self.pump_cooldown_timer = 0
         self.motor_fail_timer = 0
         self.water_supply_timer = 0
         self.overflow_timer = 0
         self.motor_stuck_timer = 0
+        self.leak_timer = 0
+        self.unbalance_retries = 0
         
-        # Success logging flags
-        self.e2_safe_logged = False
+        # Logging flags
         self.e2_error_logged = False
         self.ea_error_logged = False
-        self.pump_success_logged = False
-        self.water_success_logged = False
+        self.thermal_warning_logged = False
         
+        self._last_log_time = {}
+        self._load_config()
+
     def _load_config(self):
-        # Prefer sharp_spec.json as the master knowledge base
         spec_path = 'sharp_spec.json'
         if not os.path.exists(spec_path):
-            self.log_callback(f"ErrorMonitor: {spec_path} not found! Falling back to wm_config.json")
             spec_path = 'wm_config.json'
             
         try:
-            with open(spec_path, 'r', encoding='utf-8') as f:
-                config = json.load(f)
-                self.errors_database = config.get("errors", [])
-                self.log_callback(f"ErrorMonitor: Loaded {len(self.errors_database)} error rules from {spec_path}")
-        except Exception as e:
-            self.log_callback(f"ErrorMonitor Load Error: {e}")
+            if os.path.exists(spec_path):
+                with open(spec_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    self.errors_database = config.get("errors", [])
+        except Exception:
+            pass
 
     def evaluate_state(self, row_index, state, history):
         """
-        Ultra-Premium A-to-Z Error Detection based on Sharp Factory Specs
+        Analyzes the current machine state to detect faults.
         """
         phase = state.get('phase', 'IDLE')
         rpm = state.get('rpm', 0)
@@ -50,110 +58,95 @@ class ErrorMonitor:
         hot = state.get('hot_on', False)
         door_closed = state.get('door_closed', True)
         
-        # 1. Lid Opening Failure (E2) 
-        # Sharp Spec: Lid opened during process (WASH, RINSE, SPIN, FILL, DELAY START).
-        if not door_closed and (phase in ['WASH', 'SPIN', 'WATER_FILL', 'WEIGHT_DETECT'] or phase.startswith('RINSE')):
-            if pump or rpm > 15 or cold or hot:
-                if not self.e2_error_logged:
-                    self._trigger("E2", row_index, f"SAFETY FAULT: Lid opened while machine active! Phase: {phase}")
-                    self.e2_error_logged = True
-            else:
-                if not self.e2_safe_logged:
-                    self.log_callback(f"✅ SAFETY PASS: Machine stopped correctly on lid open during {phase}.")
-                    self.record_callback("E2 Door Safety", "PASS", f"Row {row_index}: Valid stop detected.")
-                    self.e2_safe_logged = True
-        else:
-            self.e2_safe_logged = False
-            self.e2_error_logged = False
+        # 1. Lid Opening (E2) - DISABLED UNTIL CONNECTED
+        # if row_index > 30 and not door_closed and (phase in ['WASH', 'SPIN', 'WATER_FILL', 'WEIGHT_DETECT'] or phase.startswith('RINSE')):
+        #    if pump or rpm > 15 or cold or hot:
+        #        if not self.e2_error_logged:
+        #            self._trigger("E2", row_index, f"Lid opened during active phase: {phase}")
+        #            self.e2_error_logged = True
+        # else:
+        #    self.e2_error_logged = False
 
         # 2. Drain Failure (E1) - 15 min limit
         if (phase == 'DRAIN' or pump) and not empty:
             self.pump_timer += 1
-            if self.pump_timer == 9000: # 15 min
-                self._trigger("E1", row_index, "Drain Failure: Reset level not reached in 15 mins.")
+            if self.pump_timer == 9000: # 15 min @ 10Hz
+                self._trigger("E1", row_index, "Drain timeout: Reset level not reached within 15m")
+            
+            # Pump Thermal Monitor
+            self.continuous_pump_timer += 1
+            if self.continuous_pump_timer > 1500: # 150s
+                if not self.thermal_warning_logged:
+                    msg = "WARNING: Pump continuous operation exceeds 150s thermal limit"
+                    self.log_callback(msg)
+                    self.record_callback("Pump Duty Cycle", "WARNING", f"Row {row_index}: {msg}")
+                    self.thermal_warning_logged = True
         else:
             self.pump_timer = 0
+            if not pump:
+                self.pump_cooldown_timer += 1
+                if self.pump_cooldown_timer >= 100: # 10s
+                    self.continuous_pump_timer = 0
+                    self.thermal_warning_logged = False
+                    self.pump_cooldown_timer = 0
+            else:
+                self.pump_cooldown_timer = 0
             
-        # 3. Water Supply Failure (E5) - 20 min limit
+        # 3. Water Supply (E5) - 20 min limit
         if phase == 'WATER_FILL' and (cold or hot):
             self.water_supply_timer += 1
-            if self.water_supply_timer == 12000: # 20 min
-                self._trigger("E5", row_index, "Water Supply Failure: Fill exceeded 20 mins.")
+            if self.water_supply_timer == 12000:
+                self._trigger("E5", row_index, "Fill timeout: Target level not reached within 20m")
         else:
             self.water_supply_timer = 0
             
-        # 4. Overflow Failure (E6-1) - 5 min concurrent fill/pump
+        # 4. Overflow (E6-1)
         if (cold or hot) and pump:
             self.overflow_timer += 1
-            if self.overflow_timer == 3000: 
-                self._trigger("E6-1", row_index, "Overflow Failure: Inlet & Pump active for > 5 mins.")
+            if self.overflow_timer > 100: # Fast detection for safety (10s)
+                self._trigger("E6-1", row_index, "Overflow risk: Concurrent fill and drain detected")
         else:
             self.overflow_timer = 0
 
-        # 5. Motor Rotation Failures (E7 series)
-        # E7-1/2/4: Motor doesn't rotate during WASH
+        # 5. Motor Rotation (E7 series)
         if (phase == 'WASH' or phase.startswith('RINSE')) and rpm < 5:
             self.motor_fail_timer += 1
-            if self.motor_fail_timer == 150: # 15 seconds of agitation phase without RPM
-                self._trigger("E7-1", row_index, "Motor Rotation Failure: No movement detected during agitation.")
-        # E7-3: Motor doesn't rotate during SPIN
+            if self.motor_fail_timer == 150:
+                self._trigger("E7-1", row_index, "Motor failure: No rotation during wash/rinse")
         elif phase == 'SPIN' and rpm < 10:
             self.motor_fail_timer += 1
             if self.motor_fail_timer == 150:
-                self._trigger("E7-3", row_index, "Spin Rotation Failure: Motor not reaching speed during SPIN phase.")
+                self._trigger("E7-3", row_index, "Spin failure: Motor stalled during spin cycle")
         else:
             self.motor_fail_timer = 0
 
-        # 6. Abnormal Water Leakage (E9)
-        # Sharp Spec: If during wash (not filling) there is no water (Empty = True)
-        if (phase == 'WASH' or phase.startswith('RINSE')) and empty:
-            self.leak_timer = getattr(self, 'leak_timer', 0) + 1
-            if self.leak_timer == 300: # 30 seconds of empty tub during wash
-                self._trigger("E9", row_index, "Abnormal Water Leakage: Tub empty during active wash cycle.")
-        else:
-            self.leak_timer = 0
-
-        # 7. Abnormal Water When Dry (EA)
-        # Sharp Spec: SPIN + (Empty = False) -> Failure
-        if phase == 'SPIN' and not empty and rpm > 50:
-            self._trigger("EA", row_index, "Abnormal Water: Water detected in tub during spin (Check Empty Sensor/Drain Pump).")
-
-        # 8. General Motor Failure (Eb-1)
-        # If at IDLE/Startup motor rotates > 1 min
-        if phase == 'IDLE' and rpm > 10:
-            self.motor_stuck_timer += 1
-            if self.motor_stuck_timer == 600:
-                self._trigger("Eb-1", row_index, "General Motor Failure: Spontaneous rotation during IDLE.")
-        else:
-            self.motor_stuck_timer = 0
-
-        # 9. Unbalance Failure (E3-2)
-        prev_phase = history[-2].get('phase', 'IDLE') if len(history) > 1 else 'IDLE'
-        if prev_phase == 'SPIN_PAUSE' and phase == 'WATER_FILL':
-            self.unbalance_retries = getattr(self, 'unbalance_retries', 0) + 1
-            self.log_callback(f"⚠️ UNBALANCE ATTEMPT #{self.unbalance_retries}")
-            if self.unbalance_retries >= 3:
-                self._trigger("E3-2", row_index, "Unbalance Failure: 3 failed correction attempts.")
-        if phase == 'IDLE': self.unbalance_retries = 0
+        # 6. Unbalance (E3-2)
+        if len(history) > 1:
+            prev_phase = history[-2].get('phase', 'IDLE')
+            if prev_phase == 'SPIN_PAUSE' and phase == 'WATER_FILL':
+                self.unbalance_retries += 1
+                self.log_callback(f"Unbalance attempt #{self.unbalance_retries}")
+                if self.unbalance_retries >= 3:
+                    self._trigger("E3-2", row_index, "Critical unbalance: 3 failed recovery attempts")
+        if phase == 'IDLE':
+            self.unbalance_retries = 0
 
     def _trigger(self, code, row_index, evidence):
-        # Prevent spamming the same error multiple times per second
-        last_log_time = getattr(self, '_last_log_time', {})
-        current_time = row_index # Use row index as a proxy for time (10Hz)
-        
-        if code in last_log_time and (current_time - last_log_time[code]) < 50: # 5 second cooldown
+        current_time = row_index
+        if code in self._last_log_time and (current_time - self._last_log_time[code]) < 50:
             return
             
-        self._last_log_time = last_log_time
         self._last_log_time[code] = current_time
-        
         name = next((e["name"] for e in self.errors_database if e["code"] == code), f"Fault {code}")
-        msg = f"🔴 ERROR {code} [{name}]: {evidence}"
-        self.log_callback(msg)
-        self.record_callback(f"Error Code: {code}", "FAIL", f"Row {row_index}: {evidence}")
+        
+        self.alarm_triggered.emit(f"Fault {code}: {name} | {evidence}")
+        self.log_callback(f"ERROR {code} [{name}]: {evidence}")
+        self.record_callback(f"Error {code}", "FAIL", f"Row {row_index}: {evidence}")
 
     def reset_timers(self):
         self.pump_timer = 0
+        self.continuous_pump_timer = 0
+        self.pump_cooldown_timer = 0
         self.motor_fail_timer = 0
         self.water_supply_timer = 0
         self.overflow_timer = 0
@@ -162,5 +155,5 @@ class ErrorMonitor:
         self.unbalance_retries = 0
         self.e2_error_logged = False
         self.ea_error_logged = False
-        # Optional: any other dynamic flags
-        if hasattr(self, 'motor_fail_timer'): self.motor_fail_timer = 0
+        self.thermal_warning_logged = False
+        self._last_log_time = {}

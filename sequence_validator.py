@@ -49,66 +49,91 @@ class SequenceValidator(QObject):
         # Normalize program name for mapping
         prog_key = program_name.replace(" ", "_")
         
+        # --- DEEP TRUTH LOGIC (From Course Option & Weight Specs) ---
+        # 1. Level Locking: Blanket and Tub Clean are FIXED at LEV-4
+        if program_name in ["Blanket", "Tub Clean"]:
+            level = "LEV-4"
+            self.log_callback(f"ℹ️ LOGIC SYNC: '{program_name}' is fixed at LEV-4 per Sharp specs.")
+
         if program_name not in self.sequence_chart or level not in self.sequence_chart[program_name]:
             self.log_callback(f"SequenceValidator: Program '{program_name}' Level '{level}' not found in spec!")
             return
 
         times = self.sequence_chart[program_name][level]
-        # Check course options for special flags (like weight detection)
-        options = self.course_options.get(prog_key, {})
-        if not options:
-             # Fallback to display name if underscore mapping fails
-             options = self.course_options.get(program_name, {})
-
-        # 1. Weight Detection (Standard on most programs)
-        # Default is True unless specified False in spec
-        wd_enabled = options.get("weight_detection", True)
-        if wd_enabled:
+        
+        # 2. Weight Detection Exceptions
+        # Cancelled for: Delicates, Wool, Blanket, Tub Clean
+        no_wd_courses = ["Delicates", "Wool", "Blanket", "Tub Clean"]
+        if program_name not in no_wd_courses:
             self.expected_phases.append({"name": "WEIGHT_DETECT", "duration_sec": 7.2, "type": "strict"})
 
-        # 2. Main Wash (Note: Quick Rinse skips this)
+        # 3. Main Wash
         main_wash_sec = times.get("main_wash_sec", 0)
         if main_wash_sec is not None and main_wash_sec > 0:
+            # Note: Top-up fills (M2, M3) are allowed within this duration
             self.expected_phases.append({"name": "WATER_FILL", "duration_sec": times.get("water_fill_sec", 180), "type": "max_limit"})
             self.expected_phases.append({"name": "WASH", "duration_sec": main_wash_sec, "type": "strict"})
 
-        # 3. Rinses
+        # 4. Rinses
         rinse_count = times.get("rinse_count", 0)
+        drain_sec = times.get("drain_sec", 120)
+        balance_sec = times.get("balance_spin_sec", 180)
+        inertia_sec = 60 
+        
         if rinse_count is not None:
             for i in range(1, rinse_count + 1):
-                # Every rinse starts with a DRAIN from previous phase
-                self.expected_phases.append({"name": "DRAIN", "duration_sec": times.get("drain_sec", 120), "type": "max_limit"})
-                
-                # 150s Pause after drain before spin (Clutch shift)
+                self.expected_phases.append({"name": "DRAIN", "duration_sec": drain_sec, "type": "max_limit"})
                 self.expected_phases.append({"name": "SPIN_PAUSE", "duration_sec": 150, "type": "strict"})
                 
-                # Intermediate spins: Balance (180s) + Medium Spin
-                # Quick mode has 40s Medium Spin = 220s total. Others 120s = 300s total.
-                spin_dur = 220 if "Quick" in program_name else 300
-                self.expected_phases.append({"name": "SPIN", "duration_sec": spin_dur, "type": "strict"})
-                
-                # Refill for the next rinse
+                medium_spin = 40 if "Quick" in program_name else 120
+                total_spin_dur = balance_sec + medium_spin + inertia_sec
+                self.expected_phases.append({"name": "SPIN", "duration_sec": total_spin_dur, "type": "strict"})
                 self.expected_phases.append({"name": "WATER_FILL", "duration_sec": times.get("water_fill_sec", 180), "type": "max_limit"})
-                
-                # Actual Rinse Wash (labeled RINSE_1, RINSE_2 in LogicMonitor)
                 self.expected_phases.append({"name": f"RINSE_{i}", "duration_sec": times.get("rinse_wash_sec", 240), "type": "strict"})
 
-        # 4. Final Spin
-        final_spin_sec = times.get("final_spin_sec", 0)
-        if final_spin_sec is not None and final_spin_sec > 0:
-            self.expected_phases.append({"name": "DRAIN", "duration_sec": times.get("drain_sec", 120), "type": "max_limit"})
+        # 5. Final Spin
+        final_spin_val = times.get("final_spin_sec", 0)
+        if final_spin_val is not None and final_spin_val > 0:
+            self.expected_phases.append({"name": "DRAIN", "duration_sec": drain_sec, "type": "max_limit"})
             self.expected_phases.append({"name": "SPIN_PAUSE", "duration_sec": 150, "type": "strict"})
-            self.expected_phases.append({"name": "SPIN", "duration_sec": final_spin_sec, "type": "strict"})
+            total_final_spin = balance_sec + final_spin_val + inertia_sec
+            self.expected_phases.append({"name": "SPIN", "duration_sec": total_final_spin, "type": "strict"})
 
-        # 5. Anti-Wrinkle (Optional but standard in some courses, Rinse part2.png)
-        # 120s pulsator activity to prevent clothes from sticking to the tub
-        if final_spin_sec > 0:
+        # 6. Anti-Wrinkle Exceptions
+        # Cancelled for: Quick, Delicates, Wool, Tub Clean
+        no_aw_courses = ["Quick", "Delicates", "Wool", "Tub Clean"]
+        if final_spin_val > 0 and program_name not in no_aw_courses:
             self.expected_phases.append({"name": "ANTI_WRINKLE", "duration_sec": 120, "type": "max_limit"})
 
         total_dur = sum(p["duration_sec"] for p in self.expected_phases)
         m, s = divmod(int(total_dur), 60)
-        self.log_callback(f"✅ SequenceValidator: Program '{program_name}' LEV-{level} loaded. Total duration: {m}m {s}s. Steps: {len(self.expected_phases)}")
+        self.log_callback(f"✅ SequenceValidator: '{program_name}' {level} Deep Sync Complete. Total: {m}m {s}s. Steps: {len(self.expected_phases)}")
         self._emit_status()
+        
+    def sync_to_machine_phase(self, actual_phase):
+        """Forces the validator to jump to a specific phase if machine state changes"""
+        if self.is_failed or not self.expected_phases:
+            return
+            
+        # Don't sync to IDLE
+        if actual_phase == 'IDLE':
+            return
+            
+        # Search for the phase in the future steps
+        for i in range(self.current_step_index, len(self.expected_phases)):
+            # Handle Rinse generic mapping (RINSE matches RINSE_1, RINSE_2 etc)
+            target = self.expected_phases[i]["name"]
+            match = (actual_phase == target) or (actual_phase == 'RINSE' and target.startswith('RINSE'))
+            
+            if match:
+                if i != self.current_step_index:
+                    missed = [p["name"] for p in self.expected_phases[self.current_step_index:i]]
+                    self.log_callback(f"🔄 SYNC: Jumping to {target} (Skipped: {missed})")
+                    self.current_step_index = i
+                    self.time_in_current_phase = 0
+                    self.TOLERANCE_SEC = 60 # Extra tolerance for manual entry
+                    self._emit_status()
+                return
 
 
     def evaluate_state(self, actual_phase):
@@ -123,12 +148,12 @@ class SequenceValidator(QObject):
         if actual_phase != expected_phase_name and actual_phase != 'IDLE':
             for i in range(self.current_step_index + 1, len(self.expected_phases)):
                 if actual_phase == self.expected_phases[i]["name"]:
-                    # Safety check: Don't jump over a WASH or SPIN if we just started
                     missed = [p["name"] for p in self.expected_phases[self.current_step_index:i]]
-                    self.log_callback(f"⚠️ SYNC: Machine skipped {missed} -> Moving to {actual_phase}")
+                    self.log_callback(f"ℹ️ AUTO-SYNC: Machine phase detected -> {actual_phase} (Skipped: {missed})")
                     self.current_step_index = i
                     self.time_in_current_phase = 0
-                    # Update expected pointers after jump
+                    # Add extra tolerance for manual phase entry
+                    self.TOLERANCE_SEC = 60 
                     expected_step = self.expected_phases[self.current_step_index]
                     expected_phase_name = expected_step["name"]
                     break
@@ -139,50 +164,46 @@ class SequenceValidator(QObject):
             
         time_sec = self.time_in_current_phase / 10.0
 
-        # Phase Transition Logic (Detecting when a phase ENDS)
+        # Phase Transition Logic
         if actual_phase != self.last_phase:
-            # If the machine just FINISHED the expected phase
             if self.last_phase == expected_phase_name:
                 target_time = expected_step["duration_sec"]
                 
-                # Check timing accuracy
                 if expected_step["type"] == "strict":
                     if abs(time_sec - target_time) > self.TOLERANCE_SEC:
-                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, expected {target_time}s (±{self.TOLERANCE_SEC}s).", target_time, time_sec)
+                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, expected {target_time}s", target_time, time_sec)
                         return
                 elif expected_step["type"] == "max_limit":
                     if time_sec > target_time + self.TOLERANCE_SEC:
-                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, exceeded max limit of {target_time}s.", target_time, time_sec)
+                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, max {target_time}s", target_time, time_sec)
                         return
 
-                # Record PASS and move to next step
                 self._record_pass(expected_phase_name, target_time, time_sec)
                 self.current_step_index += 1
                 self.time_in_current_phase = 0
+                self.TOLERANCE_SEC = 15 # Reset tolerance
                 
-            # Update last_phase for next tick
             self.last_phase = actual_phase
 
-        # Continuous over-run check (while still in the phase)
         if actual_phase == expected_phase_name:
             target_time = expected_step["duration_sec"]
             if expected_step["type"] == "strict" and time_sec > target_time + self.TOLERANCE_SEC:
-                 self._trigger_fail(f"Phase '{expected_phase_name}' time exceeded! Running for {time_sec:.1f}s (Target: {target_time}s).", target_time, time_sec)
+                 self._trigger_fail(f"Phase '{expected_phase_name}' limit reached: {time_sec:.1f}s / {target_time}s", target_time, time_sec)
                  return
 
         self._emit_status()
 
     def _trigger_fail(self, reason, expected=None, actual=None):
         self.is_failed = True
-        msg = f"❌ SEQUENCE FAIL: {reason}"
+        msg = f"❌ SEQUENCE FAIL: {reason} (Exp: {expected}, Act: {actual})"
         self.log_callback(msg)
-        self.record_callback("Sequence Validation", "FAIL", msg, expected, actual)
+        self.record_callback("Sequence Validation", "FAIL", msg)
         self._emit_status()
 
     def _record_pass(self, phase, expected_time, actual_time):
-        msg = f"✅ SEQUENCE PASS: {phase} completed in {actual_time:.1f}s (Expected: {expected_time}s)"
+        msg = f"✅ SEQUENCE PASS: {phase} ({actual_time:.1f}s / Exp: {expected_time}s)"
         self.log_callback(msg)
-        self.record_callback(f"Phase Validator: {phase}", "PASS", msg, expected_time, actual_time)
+        self.record_callback(f"Phase Validator: {phase}", "PASS", msg)
 
     def _emit_status(self):
         if not self.expected_phases or self.current_step_index >= len(self.expected_phases):
