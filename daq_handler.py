@@ -23,9 +23,9 @@ class DAQHandler(QObject):
             for ch in self.channels:
                 self.task.ai_channels.add_ai_voltage_chan(ch)
             
-            # Configure hardware timing for 1000 Hz, continuous mode
+            # 10,000 Hz Industrial Sampling Rate (Matches LabVIEW High-Speed standard)
             self.task.timing.cfg_samp_clk_timing(
-                rate=1000.0,
+                rate=10000.0,
                 sample_mode=nidaqmx.constants.AcquisitionType.CONTINUOUS
             )
             
@@ -47,55 +47,54 @@ class DAQHandler(QObject):
     def _daq_loop(self):
         while self.running:
             try:
-                # Read 100 samples (takes exactly 0.1 seconds at 1000 Hz hardware timing)
-                data = self.task.read(number_of_samples_per_channel=100, timeout=1.0)
+                # Read 1000 samples (takes exactly 0.1 seconds at 10,000 Hz)
+                data = self.task.read(number_of_samples_per_channel=1000, timeout=1.0)
                 
-                # Check structure
                 if not isinstance(data[0], list):
-                    # Edge case if only 1 channel exists, but we have 8
                     continue
 
                 processed_data = []
                 
-                # 1. Process Motor_RPM using a rolling 0.5-second buffer (500 samples)
-                # This guarantees high-resolution frequency calculation even at low RPMs
+                # 1. Process Motor_RPM using a rolling 0.5-second buffer (5000 samples)
                 if not hasattr(self, 'motor_buffer'):
                     self.motor_buffer = []
                 
                 self.motor_buffer.extend(data[0])
-                if len(self.motor_buffer) > 500:
-                    self.motor_buffer = self.motor_buffer[-500:]
+                if len(self.motor_buffer) > 5000:
+                    self.motor_buffer = self.motor_buffer[-5000:]
                 
                 crossing_indices = []
                 if not hasattr(self, 'last_crossing_state'):
-                    self.last_crossing_state = 'DOWN' # Initial state
+                    self.last_crossing_state = 'DOWN'
                 
-                # Hysteresis thresholds: UP at 3.0V, DOWN at 2.0V to avoid noise jitter
+                # --- FINE-TUNED CALIBRATION: Pulley Ratio 3.0 ---
+                PULSES_PER_REV = 12.0
+                PULLEY_RATIO = 3.0 # Standard industrial ratio for BLDC belt drives
+                
+                # Enhanced sensitivity: 2.0V/1.0V to capture higher-frequency, lower-amplitude pulses
                 for i in range(len(self.motor_buffer)):
                     val = self.motor_buffer[i]
-                    if self.last_crossing_state == 'DOWN' and val >= 3.0:
+                    if self.last_crossing_state == 'DOWN' and val >= 2.0:
                         self.last_crossing_state = 'UP'
                         crossing_indices.append(i)
-                    elif self.last_crossing_state == 'UP' and val <= 2.0:
+                    elif self.last_crossing_state == 'UP' and val <= 1.0:
                         self.last_crossing_state = 'DOWN'
                 
                 if len(crossing_indices) >= 2:
-                    # Calculate exact time between the first and last crossing in the buffer
                     num_periods = len(crossing_indices) - 1
-                    time_elapsed = (crossing_indices[-1] - crossing_indices[0]) / 1000.0
+                    time_elapsed = (crossing_indices[-1] - crossing_indices[0]) / 10000.0
                     frequency = num_periods / time_elapsed
+                    motor_rpm = (frequency * 60.0) / PULSES_PER_REV
+                    rpm = motor_rpm * PULLEY_RATIO
                 else:
-                    frequency = 0.0
+                    rpm = 0.0
                 
-                # Washing machine tachometers typically output 6 pulses per revolution.
-                # RPM = (Frequency * 60) / 6 = Frequency * 10.0
-                rpm = frequency * 10.0
-                processed_data.append(round(rpm, 3))  # Round to 3 decimal places
+                processed_data.append(round(rpm, 2)) 
                 
                 # 2. Process Analog Channels (ai1 to ai7 DC Voltage)
                 for ch_idx in range(1, 8):
-                    avg_val = sum(data[ch_idx]) / 100.0
-                    processed_data.append(round(avg_val, 3))  # Round to 3 decimal places
+                    avg_val = sum(data[ch_idx]) / 1000.0
+                    processed_data.append(round(avg_val, 3)) 
                     
                 self.data_ready.emit(processed_data)
                 
