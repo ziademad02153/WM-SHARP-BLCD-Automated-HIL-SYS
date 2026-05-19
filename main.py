@@ -291,11 +291,26 @@ class MainUI(QMainWindow):
         self.level_combo.addItems(["LEV-1", "LEV-2", "LEV-3", "LEV-4"])
         self.level_combo.currentTextChanged.connect(lambda: self.change_program(self.program_combo.currentText()))
         
+        self.soak_combo = QComboBox()
+        self.soak_combo.addItems(["No Soak", "1 Hour", "2 Hours", "4 Hours"])
+        self.soak_combo.currentTextChanged.connect(lambda: self.change_program(self.program_combo.currentText()))
+        
+        self.delay_combo = QComboBox()
+        delay_options = ["None"] + [f"{i} Hour{'s' if i > 1 else ''}" for i in range(1, 25)]
+        self.delay_combo.addItems(delay_options)
+        self.delay_combo.currentTextChanged.connect(lambda: self.change_program(self.program_combo.currentText()))
+        
         ctrl_layout.addWidget(QLabel("Test Program Protocol:"))
         ctrl_layout.addWidget(self.program_combo)
         ctrl_layout.addSpacing(5)
         ctrl_layout.addWidget(QLabel("Target Water Level:"))
         ctrl_layout.addWidget(self.level_combo)
+        ctrl_layout.addSpacing(5)
+        ctrl_layout.addWidget(QLabel("Soak Time Option:"))
+        ctrl_layout.addWidget(self.soak_combo)
+        ctrl_layout.addSpacing(5)
+        ctrl_layout.addWidget(QLabel("Delay Start:"))
+        ctrl_layout.addWidget(self.delay_combo)
         ctrl_layout.addSpacing(15)
         ctrl_layout.addWidget(self.btn_start)
         ctrl_layout.addWidget(self.btn_stop)
@@ -371,7 +386,9 @@ class MainUI(QMainWindow):
 
     def change_program(self, text):
         level_str = self.level_combo.currentText()
-        self.logic_mon.set_program(text, level=level_str) 
+        soak_str = self.soak_combo.currentText()
+        delay_str = self.delay_combo.currentText()
+        self.logic_mon.set_program(text, level=level_str, soak_option=soak_str, delay_option=delay_str) 
 
     def on_daq_error(self, err_msg):
         self.add_log(f"DAQ ERROR: {err_msg}")
@@ -417,8 +434,24 @@ class MainUI(QMainWindow):
                 
                 if file_path:
                     summary = self.logic_mon.get_summary()
+                    test_cases = summary['test_cases'].copy() if isinstance(summary, dict) and 'test_cases' in summary else list(summary)
+                    
+                    # Run automated agitation timings analysis (M1 to MU)
+                    try:
+                        import agitation_analyzer
+                        self.add_log("Running automated motor agitation timing validator...")
+                        agitation_results = agitation_analyzer.analyze_telemetry(
+                            self.raw_data_log, 
+                            self.program_combo.currentText(),
+                            self.level_combo.currentText()
+                        )
+                        test_cases.extend(agitation_results)
+                        self.add_log(f"Agitation validation finished. Verified {len(agitation_results)} agitation areas.", "SUCCESS")
+                    except Exception as ag_err:
+                        self.add_log(f"AGITATION VALIDATOR ERROR: {ag_err}", "ERROR")
+                        
                     exporter = ExcelExporter(file_path)
-                    exporter.export(self.raw_data_log, summary['test_cases'])
+                    exporter.export(self.raw_data_log, test_cases)
                     self.add_log("REPORT SAVED SUCCESSFULLY", "SUCCESS")
                     QMessageBox.information(self, "Save Success", f"Report saved successfully.")
                 else:
@@ -434,11 +467,35 @@ class MainUI(QMainWindow):
         save_dir = r"C:\WM-REC"
         if not os.path.exists(save_dir): os.makedirs(save_dir, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        status = "SUCCESS" if "FAIL" not in self.logic_mon.get_summary()['final_status'] else "FAULT"
-        filename = os.path.join(save_dir, f"SHARP_TEST_{status}_{ts}.xlsx")
+        
+        summary = self.logic_mon.get_summary()
+        test_cases = summary['test_cases'].copy() if isinstance(summary, dict) and 'test_cases' in summary else list(summary)
+        
+        # Run automated agitation timings analysis (M1 to MU)
+        try:
+            import agitation_analyzer
+            self.add_log("Running automated motor agitation timing validator...")
+            agitation_results = agitation_analyzer.analyze_telemetry(
+                self.raw_data_log, 
+                self.program_combo.currentText(),
+                self.level_combo.currentText()
+            )
+            test_cases.extend(agitation_results)
+            self.add_log(f"Agitation validation finished. Verified {len(agitation_results)} agitation areas.", "SUCCESS")
+        except Exception as ag_err:
+            self.add_log(f"AGITATION VALIDATOR ERROR: {ag_err}", "ERROR")
+
+        # Determine final status (if any test failed, including agitation timings!)
+        final_status = "SUCCESS"
+        for entry in test_cases:
+            if entry["Status"] == "FAIL":
+                final_status = "FAULT"
+                break
+
+        filename = os.path.join(save_dir, f"SHARP_TEST_{final_status}_{ts}.xlsx")
         exporter = ExcelExporter(filename)
         try:
-            exporter.export(self.raw_data_log, self.logic_mon.get_summary())
+            exporter.export(self.raw_data_log, test_cases)
             self.add_log(f"REPORT SAVED: {filename}")
         except Exception as e:
             self.add_log(f"SAVE ERROR: {e}")

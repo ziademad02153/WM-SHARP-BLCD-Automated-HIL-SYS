@@ -24,7 +24,7 @@ class SequenceValidator(QObject):
         self.last_phase = 'IDLE'
         self.is_failed = False
         
-        self.TOLERANCE_SEC = 15 # 15 seconds tolerance
+        self.TOLERANCE_SEC = 2.0 # Strict 2.0-second tolerance for Wash, Pump, Fill, and Drain phases
 
     def _load_config(self):
         try:
@@ -36,7 +36,7 @@ class SequenceValidator(QObject):
         except Exception as e:
             self.log_callback(f"SequenceValidator Load Error: {e}")
 
-    def set_program(self, program_name, level):
+    def set_program(self, program_name, level, soak_option="No Soak", delay_option="None"):
         """Builds a linear list of expected phases based on Sharp specifications"""
         self.current_program = program_name
         self.current_level = level
@@ -61,7 +61,25 @@ class SequenceValidator(QObject):
 
         times = self.sequence_chart[program_name][level]
         
-        # 2. Weight Detection Exceptions
+        # 1. Delay Start Option
+        if delay_option != "None":
+            try:
+                delay_hours = int(delay_option.split(" ")[0])
+                delay_sec = delay_hours * 3600
+                self.expected_phases.append({"name": "DELAY_START", "duration_sec": delay_sec, "type": "max_limit"})
+            except ValueError:
+                pass
+        
+        # 2. Soak Option (User-selected soak time as max limit ceiling)
+        # Soak is a composite phase (Pause + Rotating cycles). Machine must complete within selected time.
+        if soak_option == "1 Hour":
+            self.expected_phases.append({"name": "SOAK", "duration_sec": 3600, "type": "max_limit"})
+        elif soak_option == "2 Hours":
+            self.expected_phases.append({"name": "SOAK", "duration_sec": 7200, "type": "max_limit"})
+        elif soak_option == "4 Hours":
+            self.expected_phases.append({"name": "SOAK", "duration_sec": 14400, "type": "max_limit"})
+
+        # 3. Weight Detection Exceptions
         # Cancelled for: Delicates, Wool, Blanket, Tub Clean
         no_wd_courses = ["Delicates", "Wool", "Blanket", "Tub Clean"]
         if program_name not in no_wd_courses:
@@ -85,7 +103,9 @@ class SequenceValidator(QObject):
                 self.expected_phases.append({"name": "DRAIN", "duration_sec": drain_sec, "type": "max_limit"})
                 self.expected_phases.append({"name": "SPIN_PAUSE", "duration_sec": 150, "type": "strict"})
                 
-                medium_spin = 40 if "Quick" in program_name else 120
+                # Gentle courses (max 400 RPM) and Quick have shorter medium spin per Spin Control Specs
+                gentle_courses = ["Quick", "Quick Rinse", "Delicates", "Wool", "Sports Wear"]
+                medium_spin = 40 if program_name in gentle_courses else 120
                 total_spin_dur = balance_sec + medium_spin + inertia_sec
                 self.expected_phases.append({"name": "SPIN", "duration_sec": total_spin_dur, "type": "strict"})
                 self.expected_phases.append({"name": "WATER_FILL", "duration_sec": times.get("water_fill_sec", 180), "type": "max_limit"})
@@ -146,23 +166,50 @@ class SequenceValidator(QObject):
         # --- PHASE SYNCHRONIZATION (The "Precision Sync" Guard) ---
         # Only jump if the machine is CLEARLY in a future phase and NOT in the current one.
         if actual_phase != expected_phase_name and actual_phase != 'IDLE':
-            for i in range(self.current_step_index + 1, len(self.expected_phases)):
-                if actual_phase == self.expected_phases[i]["name"]:
-                    missed = [p["name"] for p in self.expected_phases[self.current_step_index:i]]
-                    self.log_callback(f"ℹ️ AUTO-SYNC: Machine phase detected -> {actual_phase} (Skipped: {missed})")
-                    self.current_step_index = i
-                    self.time_in_current_phase = 0
-                    # Add extra tolerance for manual phase entry
-                    self.TOLERANCE_SEC = 60 
-                    expected_step = self.expected_phases[self.current_step_index]
-                    expected_phase_name = expected_step["name"]
-                    break
+            # Prevent jumping out of SOAK due to normal soak agitations (water fill or short washes)
+            if expected_phase_name == "SOAK" and actual_phase in ["WATER_FILL", "WASH"]:
+                pass
+            else:
+                for i in range(self.current_step_index + 1, len(self.expected_phases)):
+                    if actual_phase == self.expected_phases[i]["name"]:
+                        # If we wake up from Delay Start, explicitly record its actual duration
+                        if expected_phase_name == "DELAY_START":
+                            self._record_pass(expected_phase_name, expected_step["duration_sec"], time_sec)
+                            
+                        missed = [p["name"] for p in self.expected_phases[self.current_step_index:i] if p["name"] != "DELAY_START"]
+                        if missed:
+                            self.log_callback(f"ℹ️ AUTO-SYNC: Machine phase detected -> {actual_phase} (Skipped: {missed})")
+                        else:
+                            self.log_callback(f"ℹ️ WAKE-UP: Machine started {actual_phase} after Delay.")
+                            
+                        self.current_step_index = i
+                        self.time_in_current_phase = 0
+                        # Add extra tolerance for manual phase entry
+                        self.TOLERANCE_SEC = 60 
+                        expected_step = self.expected_phases[self.current_step_index]
+                        expected_phase_name = expected_step["name"]
+                        break
         
         # Tracking Time (1 tick = 100ms)
-        if actual_phase == expected_phase_name:
+        is_soak_state = expected_phase_name == "SOAK" and actual_phase in ["IDLE", "WATER_FILL", "WASH"]
+        is_delay_state = expected_phase_name == "DELAY_START" and actual_phase == "IDLE"
+        
+        if actual_phase == expected_phase_name or is_soak_state or is_delay_state:
             self.time_in_current_phase += 1
             
         time_sec = self.time_in_current_phase / 10.0
+        
+        # Advance SOAK phase purely by time since it's a composite phase
+        if is_soak_state:
+            target_time = expected_step["duration_sec"]
+            if time_sec >= target_time:
+                self._record_pass(expected_phase_name, target_time, time_sec)
+                self.current_step_index += 1
+                self.time_in_current_phase = 0
+                self.TOLERANCE_SEC = 2.0
+                self.last_phase = actual_phase
+                self._emit_status()
+                return
 
         # Phase Transition Logic
         if actual_phase != self.last_phase:
@@ -181,7 +228,7 @@ class SequenceValidator(QObject):
                 self._record_pass(expected_phase_name, target_time, time_sec)
                 self.current_step_index += 1
                 self.time_in_current_phase = 0
-                self.TOLERANCE_SEC = 15 # Reset tolerance
+                self.TOLERANCE_SEC = 2.0 # Reset tolerance to 2.0 seconds
                 
             self.last_phase = actual_phase
 
@@ -195,9 +242,14 @@ class SequenceValidator(QObject):
 
     def _trigger_fail(self, reason, expected=None, actual=None):
         self.is_failed = True
-        msg = f"❌ SEQUENCE FAIL: {reason} (Exp: {expected}, Act: {actual})"
-        self.log_callback(msg)
-        self.record_callback("Sequence Validation", "FAIL", msg)
+        phase_name = self.expected_phases[self.current_step_index]['name'] if self.current_step_index < len(self.expected_phases) else "UNKNOWN"
+        msg = (
+            f"BUG: Timing sequence violation detected! Phase '{phase_name}' was out of bounds: {reason}. "
+            f"EXPECTED: Phase duration should be exactly {expected} seconds. "
+            f"SOURCE: Sharp Washing Machine HIL Specification Sheet (Course: {self.current_program}, Level: {self.current_level})."
+        )
+        self.log_callback(f"❌ SEQUENCE FAIL: {reason} (Exp: {expected}, Act: {actual})")
+        self.record_callback(f"Phase Validator: {phase_name}", "FAIL", msg)
         self._emit_status()
 
     def _record_pass(self, phase, expected_time, actual_time):

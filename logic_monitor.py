@@ -56,25 +56,18 @@ class LogicMonitor(QObject):
         self.analysis_summary.append(res)
         self.test_result.emit(res)
 
-    def set_program(self, ui_program_name, level=1):
-        program_map = {
-            "Regular (غسيل عادي)":              "Regular",
-            "Quick (سريع)":                      "Quick",
-            "Heavy (ثقيل/شديد الاتساخ)":        "Heavy",
-            "Baby Care (عناية بملابس الأطفال)": "Baby Care",
-            "Cotton (قطن)":                      "Cotton",
-            "Delicates (ملابس ناعمة/حساسة)":    "Delicates",
-            "Wool (صوف)":                        "Wool",
-            "Jeans (جينز)":                      "Jeans",
-            "Blanket (لحاف)":                    "Blanket",
-            "Quick Rinse (شطف سريع)":            "Quick Rinse",
-            "Sports Wear (ملابس رياضية)":        "Sports Wear",
-            "Tub Clean (تنظيف الحلة)":           "Tub Clean",
-        }
-        self.current_program = program_map.get(ui_program_name, "Regular")
+    def set_program(self, ui_program_name, level="LEV-1", soak_option="No Soak", delay_option="None"):
+        # Direct passthrough — main.py combo box sends exact program names
+        # that match sharp_spec.json keys (e.g. "Heavy", "Quick Rinse")
+        valid_programs = [
+            "Regular", "Quick", "Heavy", "Baby Care", "Cotton",
+            "Delicates", "Wool", "Jeans", "Blanket",
+            "Quick Rinse", "Sports Wear", "Tub Clean"
+        ]
+        self.current_program = ui_program_name if ui_program_name in valid_programs else "Regular"
         self.current_level = level
-        self.log_event.emit(f"Program set to {self.current_program} (Level {level})")
-        self.sequence_validator.set_program(self.current_program, f"LEV-{level}")
+        self.log_event.emit(f"Program set to {self.current_program} ({level}) - Soak: {soak_option} - Delay: {delay_option}")
+        self.sequence_validator.set_program(self.current_program, level, soak_option, delay_option)
         
     def process_row(self, data):
         try:
@@ -172,7 +165,10 @@ class LogicMonitor(QObject):
                     self.current_phase = 'WEIGHT_DETECT'
         else:
             self.weight_detect_timer = 0
-            if not self.has_filled and old_phase == 'WEIGHT_DETECT':
+            # Retain the active phase during standard short inactive pauses (e.g. motor pauses between strokes or valve cycles)
+            if old_phase in ['WASH', 'DRAIN', 'SPIN', 'WATER_FILL'] or old_phase.startswith('RINSE'):
+                pass
+            elif not self.has_filled and old_phase == 'WEIGHT_DETECT':
                 pass 
             else:
                 self.current_phase = 'IDLE'

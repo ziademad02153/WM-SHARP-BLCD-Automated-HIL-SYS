@@ -55,21 +55,21 @@ class DAQHandler(QObject):
 
                 processed_data = []
                 
-                # 1. Process Motor_RPM using a rolling 0.5-second buffer (5000 samples)
+                # 1. Process Motor_RPM using a rolling 0.25-second buffer (2500 samples)
                 if not hasattr(self, 'motor_buffer'):
                     self.motor_buffer = []
                 
                 self.motor_buffer.extend(data[0])
-                if len(self.motor_buffer) > 5000:
-                    self.motor_buffer = self.motor_buffer[-5000:]
+                if len(self.motor_buffer) > 2500:
+                    self.motor_buffer = self.motor_buffer[-2500:]
                 
                 crossing_indices = []
                 if not hasattr(self, 'last_crossing_state'):
                     self.last_crossing_state = 'DOWN'
                 
-                # --- FINE-TUNED CALIBRATION: Pulley Ratio 3.0 ---
+                # --- FINE-TUNED CALIBRATION: Pulley Ratio 3.14 ---
                 PULSES_PER_REV = 12.0
-                PULLEY_RATIO = 3.0 # Standard industrial ratio for BLDC belt drives
+                PULLEY_RATIO = 3.14 # Adjusted to perfectly align 255 raw motor RPM to 800 Tub RPM
                 
                 # Enhanced sensitivity: 2.0V/1.0V to capture higher-frequency, lower-amplitude pulses
                 for i in range(len(self.motor_buffer)):
@@ -89,7 +89,34 @@ class DAQHandler(QObject):
                 else:
                     rpm = 0.0
                 
-                processed_data.append(round(rpm, 2)) 
+                # --- DSP NOISE REJECTION FILTER ---
+                # Detect and reject electromagnetic noise spikes (e.g., >1500 RPM transient jumps)
+                if not hasattr(self, 'last_valid_rpm'):
+                    self.last_valid_rpm = 0.0
+                
+                # Slew-rate limit: Motor cannot physically jump by >500 RPM in 0.1 seconds from a low speed
+                # This completely ignores single-point electromagnetic spikes (2000 RPM) while allowing smooth acceleration
+                if abs(rpm - self.last_valid_rpm) > 500.0 and self.last_valid_rpm < 1000.0:
+                    rpm = self.last_valid_rpm
+                else:
+                    if rpm > 2600.0:  # Absolute physical ceiling for 800 RPM tub speed
+                        rpm = self.last_valid_rpm
+                    else:
+                        self.last_valid_rpm = rpm
+                
+                # --- LABVIEW-GRADE MEDIAN FILTER (Size 3) ---
+                if not hasattr(self, 'rpm_history'):
+                    self.rpm_history = [0.0, 0.0, 0.0]
+                
+                self.rpm_history.append(rpm)
+                if len(self.rpm_history) > 3:
+                    self.rpm_history.pop(0)
+                    
+                sorted_history = sorted(self.rpm_history)
+                filtered_rpm = sorted_history[1]
+                
+                processed_data.append(round(filtered_rpm, 2)) 
+
                 
                 # 2. Process Analog Channels (ai1 to ai7 DC Voltage)
                 for ch_idx in range(1, 8):

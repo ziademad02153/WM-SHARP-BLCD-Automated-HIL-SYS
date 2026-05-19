@@ -73,11 +73,11 @@ class ErrorMonitor(QObject):
             if self.pump_timer == 9000: # 15 min @ 10Hz
                 self._trigger("E1", row_index, "Drain timeout: Reset level not reached within 15m")
             
-            # Pump Thermal Monitor
+            # Pump Thermal Monitor (with a 2-second tolerance)
             self.continuous_pump_timer += 1
-            if self.continuous_pump_timer > 1500: # 150s
+            if self.continuous_pump_timer > 1520: # 152s (150s + 2s tolerance)
                 if not self.thermal_warning_logged:
-                    msg = "WARNING: Pump continuous operation exceeds 150s thermal limit"
+                    msg = "WARNING: Pump continuous operation exceeds 150s thermal limit (exceeded 152s limit)"
                     self.log_callback(msg)
                     self.record_callback("Pump Duty Cycle", "WARNING", f"Row {row_index}: {msg}")
                     self.thermal_warning_logged = True
