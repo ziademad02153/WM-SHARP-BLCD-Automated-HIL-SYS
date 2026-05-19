@@ -60,7 +60,7 @@ class ExcelExporter:
             default_format = workbook.add_format({'valign': 'top', 'border': 1})
             
             # --- Write Header Stats ---
-            worksheet_summary.merge_range('A1:F1', 'Sharp Automated Software Validation - Execution Report', header_format)
+            worksheet_summary.merge_range('A1:F1', 'Sharp Automated Software Verification - Execution Report', header_format)
             
             total_tests = len(df_summary)
             pass_count = len(df_summary[df_summary['Status'] == 'PASS'])

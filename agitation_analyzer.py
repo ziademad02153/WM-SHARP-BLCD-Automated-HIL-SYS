@@ -93,25 +93,31 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
     if current_stroke:
         strokes.append(current_stroke)
 
-    # 3. Calculate stroke metrics and calibrate physical delays
-    # Compensation math: 0.15s software lag + 0.25s VFD deceleration = 0.4s total stretch offset
+    # 3. Calculate stroke metrics based on exact engineering specification
     calibrated_strokes = []
     for idx, stroke in enumerate(strokes):
         start_row = stroke[0][0]
-        end_row = stroke[-1][0]
-        measured_on = (end_row - start_row + 1) * 0.1
+        peak_rpm = max(r[2] for r in stroke)
         
-        # Calculate pause after this stroke
-        measured_off = None
+        # Plateau detection: iterate backwards to find the start of the final deceleration
+        plateau_end_row = stroke[-1][0]
+        for i in range(len(stroke) - 1, 0, -1):
+            rpm_curr = stroke[i][2]
+            rpm_prev = stroke[i-1][2]
+            drop = rpm_prev - rpm_curr
+            if drop < 10.0:  # Consistent deceleration stops here
+                plateau_end_row = stroke[i-1][0]
+                break
+                
+        # Calculate Electrical ON (from start >0 to plateau end)
+        elec_on = round((plateau_end_row - start_row + 1) * 0.1, 2)
+        
+        # Calculate Pause after this stroke
+        elec_off = None
         if idx < len(strokes) - 1:
             next_start_row = strokes[idx+1][0][0]
-            measured_off = (next_start_row - end_row - 1) * 0.1
+            elec_off = round((next_start_row - plateau_end_row - 1) * 0.1, 2)
             
-        # Calibration Formula:
-        # Optimized for halved DAQ buffer size (0.25s VFD deceleration delay, 0s OFF-time stretch)
-        elec_on = max(0.1, round(measured_on - 0.25, 2))
-        elec_off = round(measured_off, 2) if measured_off is not None else None
-        
         # Check active valves during the stroke to classify intermediate fill (M3)
         cold_avg = sum(r[3] for r in stroke) / len(stroke)
         hot_avg = sum(r[4] for r in stroke) / len(stroke)
@@ -119,13 +125,12 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
         
         calibrated_strokes.append({
             "start_row": start_row,
-            "end_row": end_row,
-            "measured_on": measured_on,
-            "measured_off": measured_off,
+            "end_row": stroke[-1][0],
+            "plateau_end_row": plateau_end_row,
             "elec_on": elec_on,
             "elec_off": elec_off,
             "is_water_active": is_water_active,
-            "peak_rpm": max(r[2] for r in stroke)
+            "peak_rpm": peak_rpm
         })
 
     # 4. Perform Verifications (M1, M2, M3, M4, MU, Anti-Wrinkle)
@@ -181,6 +186,9 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
         # Any stroke starting AFTER the final spin is classified as Anti-Wrinkle
         if last_spin_row > 0 and s["start_row"] > last_spin_row:
             aw_strokes.append(s)
+        # Exclude massive spin cycles (> 10s ON time) from agitation analysis
+        elif s["elec_on"] > 10.0:
+            continue
         # MU pattern has very short ON (< 0.4s electrical)
         elif s["elec_on"] <= 0.35:
             mu_strokes.append(s)
@@ -256,7 +264,7 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
                 m2_evidence = f"Verified {len(m2_strokes)} initial agitation cycles. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All cycles match specification within strict ±0.25s HIL safety tolerance."
                 
             verifications.append({
-                "Row_Index": m2_strokes[0]["start_row"],
+                "Row_Index": f"{m2_strokes[0]['start_row']}-{m2_strokes[-1]['plateau_end_row']}",
                 "Test_Name": f"M2 Initial Wash Agitation (Level {level_key})",
                 "Status": m2_status,
                 "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
@@ -305,7 +313,7 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
                 m3_evidence = f"Verified {len(m3_strokes)} intermediate cycles during water supply. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All intermediate fill agitation cycles match specification."
                 
             verifications.append({
-                "Row_Index": m3_strokes[0]["start_row"],
+                "Row_Index": f"{m3_strokes[0]['start_row']}-{m3_strokes[-1]['plateau_end_row']}",
                 "Test_Name": f"M3 Intermediate Agitation (Level {level_key})",
                 "Status": m3_status,
                 "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
@@ -356,7 +364,7 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
             m4_evidence = f"Verified {len(m4_strokes)} main high-load wash cycles. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All main high-load wash cycles match specification."
             
         verifications.append({
-            "Row_Index": m4_strokes[0]["start_row"],
+            "Row_Index": f"{m4_strokes[0]['start_row']}-{m4_strokes[-1]['plateau_end_row']}",
             "Test_Name": f"M4 Main Wash Agitation (Level {level_key})",
             "Status": m4_status,
             "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
@@ -405,7 +413,7 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
             mu_evidence = f"Verified {len(mu_strokes)} gentle unbalance stir / fragrance cycles. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All unbalance correction / fragrance agitation cycles match specification."
             
         verifications.append({
-            "Row_Index": mu_strokes[0]["start_row"],
+            "Row_Index": f"{mu_strokes[0]['start_row']}-{mu_strokes[-1]['plateau_end_row']}",
             "Test_Name": "MU Unbalance Stir / Fragrance Agitation",
             "Status": mu_status,
             "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
