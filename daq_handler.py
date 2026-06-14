@@ -55,54 +55,55 @@ class DAQHandler(QObject):
 
                 processed_data = []
                 
-                # 1. Process Motor_RPM using a rolling 0.25-second buffer (2500 samples)
-                if not hasattr(self, 'motor_buffer'):
-                    self.motor_buffer = []
+                if not hasattr(self, 'global_idx'):
+                    self.global_idx = 0
+                    self.last_crossing_idx = -1
+                    self.current_state = 'DOWN'
+                    self.last_valid_rpm = 0.0
+                    self.debounce_counter = 0
+
+                PULSES_PER_REV = 4.0
+                high_thresh = 2.0
+                low_thresh = 1.0
                 
-                self.motor_buffer.extend(data[0])
-                if len(self.motor_buffer) > 2500:
-                    self.motor_buffer = self.motor_buffer[-2500:]
+                for val in data[0]:
+                    # Timeout to force RPM to 0 if motor stops (no pulses for 0.25 seconds)
+                    if self.last_crossing_idx != -1 and (self.global_idx - self.last_crossing_idx) > 2500:
+                        self.last_valid_rpm = 0.0
+                        
+                    if self.debounce_counter > 0:
+                        self.debounce_counter -= 1
+                    else:
+                        if self.current_state == 'DOWN' and val >= high_thresh:
+                            self.current_state = 'UP'
+                            if self.last_crossing_idx != -1:
+                                delta_samples = self.global_idx - self.last_crossing_idx
+                                time_elapsed = delta_samples / 10000.0
+                                frequency = 1.0 / time_elapsed
+                                self.last_valid_rpm = (frequency / PULSES_PER_REV) * 60.0
+                            self.last_crossing_idx = self.global_idx
+                            self.debounce_counter = 40  # Lock out all noise/bounces for 4ms
+                        elif self.current_state == 'UP' and val <= low_thresh:
+                            self.current_state = 'DOWN'
+                            self.debounce_counter = 40  # Lock out falling edge bounces too
+                    
+                    self.global_idx += 1
                 
-                crossing_indices = []
-                if not hasattr(self, 'last_crossing_state'):
-                    self.last_crossing_state = 'DOWN'
-                
-                # --- FINE-TUNED CALIBRATION: Pulley Ratio 3.14 ---
-                PULSES_PER_REV = 12.0
-                PULLEY_RATIO = 3.14 # Adjusted to perfectly align 255 raw motor RPM to 800 Tub RPM
-                
-                # Enhanced sensitivity: 2.0V/1.0V to capture higher-frequency, lower-amplitude pulses
-                for i in range(len(self.motor_buffer)):
-                    val = self.motor_buffer[i]
-                    if self.last_crossing_state == 'DOWN' and val >= 2.0:
-                        self.last_crossing_state = 'UP'
-                        crossing_indices.append(i)
-                    elif self.last_crossing_state == 'UP' and val <= 1.0:
-                        self.last_crossing_state = 'DOWN'
-                
-                if len(crossing_indices) >= 2:
-                    num_periods = len(crossing_indices) - 1
-                    time_elapsed = (crossing_indices[-1] - crossing_indices[0]) / 10000.0
-                    frequency = num_periods / time_elapsed
-                    motor_rpm = (frequency * 60.0) / PULSES_PER_REV
-                    rpm = motor_rpm * PULLEY_RATIO
-                else:
-                    rpm = 0.0
-                
-                # --- DSP NOISE REJECTION FILTER ---
-                # Detect and reject electromagnetic noise spikes (e.g., >1500 RPM transient jumps)
-                if not hasattr(self, 'last_valid_rpm'):
+                # Zero-speed timeout: if no edges detected for 1.0 second (10000 samples)
+                if (self.global_idx - self.last_crossing_idx) > 10000:
                     self.last_valid_rpm = 0.0
                 
-                # Slew-rate limit: Motor cannot physically jump by >500 RPM in 0.1 seconds from a low speed
-                # This completely ignores single-point electromagnetic spikes (2000 RPM) while allowing smooth acceleration
-                if abs(rpm - self.last_valid_rpm) > 500.0 and self.last_valid_rpm < 1000.0:
-                    rpm = self.last_valid_rpm
+                rpm = self.last_valid_rpm
+                
+                # --- DSP NOISE REJECTION FILTER ---
+                # Only reject physically impossible spikes (> 2600 RPM)
+                if not hasattr(self, 'last_valid_rpm_check'):
+                    self.last_valid_rpm_check = 0.0
+                
+                if rpm > 2600.0:  # Absolute physical ceiling
+                    rpm = self.last_valid_rpm_check
                 else:
-                    if rpm > 2600.0:  # Absolute physical ceiling for 800 RPM tub speed
-                        rpm = self.last_valid_rpm
-                    else:
-                        self.last_valid_rpm = rpm
+                    self.last_valid_rpm_check = rpm
                 
                 # --- LABVIEW-GRADE MEDIAN FILTER (Size 3) ---
                 if not hasattr(self, 'rpm_history'):

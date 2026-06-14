@@ -121,7 +121,7 @@ class SequenceValidator(QObject):
 
         # 6. Anti-Wrinkle Exceptions
         # Cancelled for: Quick, Delicates, Wool, Tub Clean
-        no_aw_courses = ["Quick", "Delicates", "Wool", "Tub Clean"]
+        no_aw_courses = ["Quick", "Delicates", "Sports Wear", "Tub Clean"]
         if final_spin_val > 0 and program_name not in no_aw_courses:
             self.expected_phases.append({"name": "ANTI_WRINKLE", "duration_sec": 120, "type": "max_limit"})
 
@@ -138,6 +138,13 @@ class SequenceValidator(QObject):
         # Don't sync to IDLE
         if actual_phase == 'IDLE':
             return
+            
+        # Precision Sync Guard: Do not force-jump if it's the normal expected *next* sequential phase
+        if self.current_step_index + 1 < len(self.expected_phases):
+            next_name = self.expected_phases[self.current_step_index + 1]["name"]
+            if (actual_phase == next_name) or (actual_phase == 'RINSE' and next_name.startswith('RINSE')):
+                # Let evaluate_state handle the normal sequential transition and pass/fail recording
+                return
             
         # Search for the phase in the future steps
         for i in range(self.current_step_index, len(self.expected_phases)):
@@ -156,7 +163,7 @@ class SequenceValidator(QObject):
                 return
 
 
-    def evaluate_state(self, actual_phase):
+    def evaluate_state(self, actual_phase, row_index):
         if self.is_failed or not self.expected_phases or self.current_step_index >= len(self.expected_phases):
             return
 
@@ -165,7 +172,14 @@ class SequenceValidator(QObject):
 
         # --- PHASE SYNCHRONIZATION (The "Precision Sync" Guard) ---
         # Only jump if the machine is CLEARLY in a future phase and NOT in the current one.
-        if actual_phase != expected_phase_name and actual_phase != 'IDLE':
+        is_next_expected = False
+        if self.current_step_index + 1 < len(self.expected_phases):
+            next_name = self.expected_phases[self.current_step_index + 1]["name"]
+            if (actual_phase == next_name) or (actual_phase == 'RINSE' and next_name.startswith('RINSE')):
+                if self.last_phase == expected_phase_name:
+                    is_next_expected = True
+
+        if actual_phase != expected_phase_name and actual_phase != 'IDLE' and not is_next_expected:
             # Prevent jumping out of SOAK due to normal soak agitations (water fill or short washes)
             if expected_phase_name == "SOAK" and actual_phase in ["WATER_FILL", "WASH"]:
                 pass
@@ -174,7 +188,8 @@ class SequenceValidator(QObject):
                     if actual_phase == self.expected_phases[i]["name"]:
                         # If we wake up from Delay Start, explicitly record its actual duration
                         if expected_phase_name == "DELAY_START":
-                            self._record_pass(expected_phase_name, expected_step["duration_sec"], time_sec)
+                            delay_time_sec = self.time_in_current_phase / 10.0
+                            self._record_pass(expected_phase_name, expected_step["duration_sec"], delay_time_sec, f"{self.phase_start_row}-{row_index}")
                             
                         missed = [p["name"] for p in self.expected_phases[self.current_step_index:i] if p["name"] != "DELAY_START"]
                         if missed:
@@ -184,6 +199,7 @@ class SequenceValidator(QObject):
                             
                         self.current_step_index = i
                         self.time_in_current_phase = 0
+                        self.phase_start_row = row_index
                         # Add extra tolerance for manual phase entry
                         self.TOLERANCE_SEC = 60 
                         expected_step = self.expected_phases[self.current_step_index]
@@ -195,6 +211,8 @@ class SequenceValidator(QObject):
         is_delay_state = expected_phase_name == "DELAY_START" and actual_phase == "IDLE"
         
         if actual_phase == expected_phase_name or is_soak_state or is_delay_state:
+            if self.time_in_current_phase == 0 or getattr(self, 'phase_start_row', None) is None:
+                self.phase_start_row = row_index
             self.time_in_current_phase += 1
             
         time_sec = self.time_in_current_phase / 10.0
@@ -203,9 +221,10 @@ class SequenceValidator(QObject):
         if is_soak_state:
             target_time = expected_step["duration_sec"]
             if time_sec >= target_time:
-                self._record_pass(expected_phase_name, target_time, time_sec)
+                self._record_pass(expected_phase_name, target_time, time_sec, f"{self.phase_start_row}-{row_index}")
                 self.current_step_index += 1
                 self.time_in_current_phase = 0
+                self.phase_start_row = None
                 self.TOLERANCE_SEC = 2.0
                 self.last_phase = actual_phase
                 self._emit_status()
@@ -218,16 +237,17 @@ class SequenceValidator(QObject):
                 
                 if expected_step["type"] == "strict":
                     if abs(time_sec - target_time) > self.TOLERANCE_SEC:
-                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, expected {target_time}s", target_time, time_sec)
+                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, expected {target_time}s", target_time, time_sec, f"{self.phase_start_row}-{row_index}")
                         return
                 elif expected_step["type"] == "max_limit":
                     if time_sec > target_time + self.TOLERANCE_SEC:
-                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, max {target_time}s", target_time, time_sec)
+                        self._trigger_fail(f"Phase '{expected_phase_name}' took {time_sec:.1f}s, max {target_time}s", target_time, time_sec, f"{self.phase_start_row}-{row_index}")
                         return
 
-                self._record_pass(expected_phase_name, target_time, time_sec)
+                self._record_pass(expected_phase_name, target_time, time_sec, f"{self.phase_start_row}-{row_index}")
                 self.current_step_index += 1
                 self.time_in_current_phase = 0
+                self.phase_start_row = None
                 self.TOLERANCE_SEC = 2.0 # Reset tolerance to 2.0 seconds
                 
             self.last_phase = actual_phase
@@ -235,12 +255,12 @@ class SequenceValidator(QObject):
         if actual_phase == expected_phase_name:
             target_time = expected_step["duration_sec"]
             if expected_step["type"] == "strict" and time_sec > target_time + self.TOLERANCE_SEC:
-                 self._trigger_fail(f"Phase '{expected_phase_name}' limit reached: {time_sec:.1f}s / {target_time}s", target_time, time_sec)
+                 self._trigger_fail(f"Phase '{expected_phase_name}' limit reached: {time_sec:.1f}s / {target_time}s", target_time, time_sec, f"{self.phase_start_row}-{row_index}")
                  return
 
         self._emit_status()
 
-    def _trigger_fail(self, reason, expected=None, actual=None):
+    def _trigger_fail(self, reason, expected=None, actual=None, row_range=None):
         self.is_failed = True
         phase_name = self.expected_phases[self.current_step_index]['name'] if self.current_step_index < len(self.expected_phases) else "UNKNOWN"
         msg = (
@@ -249,13 +269,13 @@ class SequenceValidator(QObject):
             f"SOURCE: Sharp Washing Machine HIL Specification Sheet (Course: {self.current_program}, Level: {self.current_level})."
         )
         self.log_callback(f"❌ SEQUENCE FAIL: {reason} (Exp: {expected}, Act: {actual})")
-        self.record_callback(f"Phase Validator: {phase_name}", "FAIL", msg)
+        self.record_callback(f"Phase Validator: {phase_name}", "FAIL", msg, expected if expected else 0, actual if actual else 0, row_range)
         self._emit_status()
 
-    def _record_pass(self, phase, expected_time, actual_time):
+    def _record_pass(self, phase, expected_time, actual_time, row_range=None):
         msg = f"✅ SEQUENCE PASS: {phase} ({actual_time:.1f}s / Exp: {expected_time}s)"
         self.log_callback(msg)
-        self.record_callback(f"Phase Validator: {phase}", "PASS", msg)
+        self.record_callback(f"Phase Validator: {phase}", "PASS", msg, expected_time, actual_time, row_range)
 
     def _emit_status(self):
         if not self.expected_phases or self.current_step_index >= len(self.expected_phases):
@@ -281,3 +301,4 @@ class SequenceValidator(QObject):
         self.last_phase = 'IDLE'
         self.is_failed = False
         self.expected_phases = []
+        self.phase_start_row = None

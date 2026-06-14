@@ -25,6 +25,7 @@ class LogicMonitor(QObject):
         
         # Spin Curve State Machine
         self.spin_timer = 0
+        self.spin_decel_timer = 0
         self.spin_state = "IDLE" # IDLE, RAMP_1, BALANCE, RAMP_2, MID_SPIN, RAMP_3, HIGH_SPIN, COASTING
         
         self.current_phase = 'IDLE'
@@ -44,9 +45,9 @@ class LogicMonitor(QObject):
         self.sequence_validator = SequenceValidator(self.log_event.emit, self._record_result_proxy)
         self.sequence_validator.validation_status.connect(self.validation_status.emit)
         
-    def _record_result_proxy(self, test_name, status, evidence, expected=0, actual=0):
+    def _record_result_proxy(self, test_name, status, evidence, expected=0, actual=0, row_range=None):
         res = {
-            "Row_Index": self.row_index, 
+            "Row_Index": row_range if row_range is not None else self.row_index, 
             "Test_Name": test_name, 
             "Status": status, 
             "Expected_Sec": expected,
@@ -78,6 +79,7 @@ class LogicMonitor(QObject):
             gearmotor_on = gearmotor > self.VOLTAGE_THRESHOLD
             cold_on = cold > self.VOLTAGE_THRESHOLD
             hot_on = hot > self.VOLTAGE_THRESHOLD
+            softener_on = softener > self.VOLTAGE_THRESHOLD
             empty_on = empty > self.VOLTAGE_THRESHOLD
             door_closed = door > 1.0 
             
@@ -97,6 +99,7 @@ class LogicMonitor(QObject):
                 "gearmotor_on": gearmotor_on,
                 "cold_on": cold_on,
                 "hot_on": hot_on,
+                "softener_on": softener_on,
                 "empty_on": empty_on,
                 "rpm": motor_rpm,
                 "phase": self.current_phase
@@ -119,7 +122,7 @@ class LogicMonitor(QObject):
             else:
                 self.pump_duty_status.emit("OK", "#39FF14")
                 
-            self.sequence_validator.evaluate_state(self.current_phase)
+            self.sequence_validator.evaluate_state(self.current_phase, self.row_index)
             
         except Exception as e:
             self.log_event.emit(f"ERROR: Logic processing failed: {str(e)}")
@@ -133,8 +136,8 @@ class LogicMonitor(QObject):
         rpm = state['rpm']
         softener = state.get('softener_on', False)
         
-        # Detect transition from DRAIN to next phase
-        if old_phase == 'DRAIN' and not (pump or gear):
+        # Detect transition from DRAIN or SPIN to next phase
+        if old_phase in ['DRAIN', 'SPIN'] and not (pump or gear):
             if not self.was_draining: # Transition edge
                 self.drain_count += 1
                 self.has_filled = False # Reset fill status for next cycle (Rinse)
@@ -142,11 +145,29 @@ class LogicMonitor(QObject):
         else:
             self.was_draining = False
 
+        if not (pump or gear):
+            self.spin_decel_timer = 0
+
         if pump or gear:
-            self.current_phase = 'SPIN' if rpm > 40 else 'DRAIN'
+            if rpm > 40:
+                self.current_phase = 'SPIN'
+                self.spin_decel_timer = 0
+            else:
+                if old_phase == 'SPIN':
+                    self.spin_decel_timer += 1
+                    if self.spin_decel_timer >= 150: # 15s debounce
+                        self.current_phase = 'DRAIN'
+                    else:
+                        self.current_phase = 'SPIN'
+                else:
+                    self.current_phase = 'DRAIN'
         elif cold or hot or softener:
-            self.current_phase = 'WATER_FILL'
-            self.has_filled = True
+            if old_phase not in ['WASH'] and not old_phase.startswith('RINSE'):
+                self.current_phase = 'WATER_FILL'
+                self.has_filled = True
+        elif old_phase == 'SPIN' and rpm > 5:
+            # Coasting/Deceleration period of SPIN: retain SPIN
+            self.current_phase = 'SPIN'
         elif rpm > 5:
             if self.has_filled:
                 # Logic: If softener was used, or we drained once, it's RINSE
@@ -166,7 +187,7 @@ class LogicMonitor(QObject):
         else:
             self.weight_detect_timer = 0
             # Retain the active phase during standard short inactive pauses (e.g. motor pauses between strokes or valve cycles)
-            if old_phase in ['WASH', 'DRAIN', 'SPIN', 'WATER_FILL'] or old_phase.startswith('RINSE'):
+            if old_phase in ['WASH'] or old_phase.startswith('RINSE'):
                 pass
             elif not self.has_filled and old_phase == 'WEIGHT_DETECT':
                 pass 
@@ -192,6 +213,8 @@ class LogicMonitor(QObject):
 
         self.spin_timer += 1
         t = self.spin_timer / 10.0 # Time in seconds
+        
+        is_gentle = self.current_program in ["Delicates", "Wool", "Sports Wear"]
 
         if self.spin_state == "IDLE":
             self.spin_state = "RAMP_1"
@@ -209,23 +232,35 @@ class LogicMonitor(QObject):
         elif self.spin_state == "BALANCE":
             duration = t - self.balance_start_time
             if duration >= 20: # Should stay 20s at 300
-                if rpm > 400:
-                    self.spin_state = "RAMP_2"
-                    self.spin_logic_status.emit("RAMP 600", "#FFEA00")
+                if is_gentle:
+                    if rpm > 320:
+                        self.spin_state = "RAMP_2"
+                        self.spin_logic_status.emit("RAMP 400", "#FFEA00")
+                    else:
+                        self.spin_logic_status.emit(f"BALANCING ({int(duration)}s)", "#39FF14")
                 else:
-                    self.spin_logic_status.emit(f"BALANCING ({int(duration)}s)", "#39FF14")
+                    if rpm > 400:
+                        self.spin_state = "RAMP_2"
+                        self.spin_logic_status.emit("RAMP 600", "#FFEA00")
+                    else:
+                        self.spin_logic_status.emit(f"BALANCING ({int(duration)}s)", "#39FF14")
             else:
-                if rpm > 400: # Jumped too early
+                if (is_gentle and rpm > 350) or (not is_gentle and rpm > 400): # Jumped too early
                     self.spin_logic_status.emit(f"SHORT BAL ({int(duration)}s)", "#FF3131")
                     self.spin_state = "RAMP_2"
 
         elif self.spin_state == "RAMP_2":
-            if rpm >= 580:
-                self.spin_state = "MID_SPIN"
-                self.spin_logic_status.emit("MID SPIN 600", "#39FF14")
+            if is_gentle:
+                if rpm >= 380:
+                    self.spin_state = "HIGH_SPIN"
+                    self.spin_logic_status.emit("HIGH SPIN 400", "#39FF14")
+            else:
+                if rpm >= 580:
+                    self.spin_state = "MID_SPIN"
+                    self.spin_logic_status.emit("MID SPIN 600", "#39FF14")
 
         elif self.spin_state == "MID_SPIN":
-            if rpm > 650:
+            if not is_gentle and rpm > 650:
                 self.spin_state = "HIGH_SPIN"
                 self.spin_logic_status.emit("HIGH SPIN 700", "#39FF14")
 
@@ -235,6 +270,7 @@ class LogicMonitor(QObject):
         self.analysis_summary.clear()
         self.spin_state = "IDLE"
         self.spin_timer = 0
+        self.spin_decel_timer = 0
         self.current_phase = 'IDLE'
         self.drain_count = 0
         self.has_filled = False

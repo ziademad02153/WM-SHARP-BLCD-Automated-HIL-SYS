@@ -21,8 +21,9 @@ TIMINGS = {
         "4": { "m2": (0.5, 2.0), "m3": (0.5, 2.0), "m4": (0.5, 2.0) }
     },
     "Blanket": { "on": 3.8, "off": 0.7 },
+    "Blanket_MU": { "on": 1.0, "off": 0.7 },
     "Tub Clean": { "on": 1.5, "off": 1.0 },
-    "MU": { "on": 0.3, "off": 1.2 },
+    "MU": { "on": 0.3, "off": 0.7 },
     "Soak": { "on": 2.4, "off": 2.6 }
 }
 
@@ -38,6 +39,7 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
     Returns a list of verification summary dictionaries ready for the Excel report.
     """
     verifications = []
+    course_group = "Unknown"
     
     # 1. Determine expected timings (Support custom groups & special courses)
     if program_name == "Blanket":
@@ -93,21 +95,21 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
     if current_stroke:
         strokes.append(current_stroke)
 
+    # Filter out SPIN/DRAIN active pump/gear strokes (>2.0V)
+    strokes = [s for s in strokes if not any(r[8] > 2.0 or r[6] > 2.0 for r in s)]
+
     # 3. Calculate stroke metrics based on exact engineering specification
     calibrated_strokes = []
     for idx, stroke in enumerate(strokes):
         start_row = stroke[0][0]
         peak_rpm = max(r[2] for r in stroke)
         
-        # Plateau detection: iterate backwards to find the start of the final deceleration
-        plateau_end_row = stroke[-1][0]
-        for i in range(len(stroke) - 1, 0, -1):
-            rpm_curr = stroke[i][2]
-            rpm_prev = stroke[i-1][2]
-            drop = rpm_prev - rpm_curr
-            if drop < 10.0:  # Consistent deceleration stops here
-                plateau_end_row = stroke[i-1][0]
-                break
+        # Plateau detection: find the last row in stroke where RPM >= 0.95 * peak_rpm
+        plateau_end_idx = 0
+        for i, r in enumerate(stroke):
+            if r[2] >= 0.95 * peak_rpm:
+                plateau_end_idx = i
+        plateau_end_row = stroke[plateau_end_idx][0]
                 
         # Calculate Electrical ON (from start >0 to plateau end)
         elec_on = round((plateau_end_row - start_row + 1) * 0.1, 2)
@@ -133,8 +135,39 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
             "peak_rpm": peak_rpm
         })
 
+    # Noise Filter & Isolation
+    filtered_strokes = []
+    for idx, s in enumerate(calibrated_strokes):
+        # Engineering threshold: 15 Tub RPM effectively separates physical agitation from electrical noise.
+        if s["elec_on"] < 0.25 or s["peak_rpm"] < 15:
+            continue
+        
+        prev_off = calibrated_strokes[idx-1]["elec_off"] if idx > 0 else 0
+        next_off = s["elec_off"] if s["elec_off"] is not None else 0
+        
+        if s["elec_on"] <= 0.3 and prev_off > 5.0 and next_off > 5.0:
+            continue
+            
+        filtered_strokes.append(s)
+
+    # Recalculate OFF times for filtered strokes
+    for i in range(len(filtered_strokes) - 1):
+        filtered_strokes[i]["elec_off"] = round((filtered_strokes[i+1]["start_row"] - filtered_strokes[i]["plateau_end_row"] - 1) * 0.1, 2)
+    if filtered_strokes:
+        filtered_strokes[-1]["elec_off"] = None
+
+    calibrated_strokes = filtered_strokes
+
+    # Find the end of WASH (first DRAIN = first time pump turns on after motor has started)
+    first_motor_row = strokes[0][0][0] if strokes else 0
+    first_drain_row = 9999999
+    for r in raw_data_log:
+        if first_motor_row and r[0] > first_motor_row + 100 and r[8] > 2.0:
+            first_drain_row = r[0]
+            break
+
     # 4. Perform Verifications (M1, M2, M3, M4, MU, Anti-Wrinkle)
-    TOLERANCE = 0.25  # 250 milliseconds HIL standard tolerance
+    TOLERANCE = 0.20  # 200 milliseconds tolerance based on user instructions
     
     # ── M1: Initial Water Fill Verification ──
     m1_rows = [r for r in raw_data_log if (r[3] > 4.0 or r[4] > 4.0) and r[0] < (strokes[0][0][0] if strokes else 999999)]
@@ -161,7 +194,7 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
         )
         
     verifications.append({
-        "Row_Index": m1_rows[0][0] if m1_rows else 1,
+        "Row_Index": f"{m1_rows[0][0]}-{m1_rows[-1][0]}" if m1_rows else 1,
         "Test_Name": "M1 Initial Water Fill & Level Verification",
         "Status": m1_status,
         "Expected_Sec": "Motor: 0.0s | Fill: Active",
@@ -185,22 +218,76 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
     for s in calibrated_strokes:
         # Any stroke starting AFTER the final spin is classified as Anti-Wrinkle
         if last_spin_row > 0 and s["start_row"] > last_spin_row:
-            aw_strokes.append(s)
+            if s["elec_on"] >= 0.3:
+                aw_strokes.append(s)
         # Exclude massive spin cycles (> 10s ON time) from agitation analysis
         elif s["elec_on"] > 10.0:
             continue
-        # MU pattern has very short ON (< 0.4s electrical)
-        elif s["elec_on"] <= 0.35:
+        # MU pattern has very short ON (<= 0.6s electrical) to handle 0.3s spec with tolerance
+        elif s["elec_on"] <= 0.6 and s["start_row"] <= first_drain_row:
             mu_strokes.append(s)
-        # M3 pattern has active water valves during the stroke
-        elif s["is_water_active"]:
-            m3_strokes.append(s)
-        # M2 is active in the first 60 seconds after agitation starts
-        elif (s["start_row"] * 0.1 - first_stroke_time) <= 60.0:
-            m2_strokes.append(s)
-        # M4 is the rest of the main wash
+        # Stroke must be inside WASH (before first DRAIN) for M2/M3/M4
+        elif s["start_row"] <= first_drain_row:
+            # M3 pattern has active water valves during the stroke
+            if s["is_water_active"]:
+                m3_strokes.append(s)
+            # M2 is active in the first 60 seconds after agitation starts
+            elif (s["start_row"] * 0.1 - first_stroke_time) <= 60.0:
+                m2_strokes.append(s)
+            # M4 is the rest of the main wash
+            else:
+                m4_strokes.append(s)
+
+    def validate_movement(movement_strokes, phase_name, expected_specs):
+        if not movement_strokes:
+            return {
+                "Row_Index": 1,
+                "Test_Name": f"{phase_name} Agitation (Level {level_key})",
+                "Status": "FAIL",
+                "Expected_Sec": "N/A",
+                "Actual_Sec": "N/A",
+                "Technical_Evidence": (
+                    f"BUG: Dead Motor! No wash agitation strokes detected during the {phase_name} phase. "
+                    f"EXPECTED: Motor should agitate per spec. "
+                    f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: {phase_name})."
+                )
+            }
+        
+        exp_on, exp_off = expected_specs
+        on_times = [s["elec_on"] for s in movement_strokes]
+        off_times = [s["elec_off"] for s in movement_strokes if s["elec_off"] is not None and s["elec_off"] < 15.0]
+        avg_on = round(np.mean(on_times), 2) if on_times else 0.0
+        avg_off = round(np.mean(off_times), 2) if off_times else 0.0
+        
+        failures = []
+        for s in movement_strokes:
+            if abs(s["elec_on"] - exp_on) > TOLERANCE:
+                failures.append(f"Row {s['start_row']}-{s['end_row']}: ON {s['elec_on']}s")
+            if s["elec_off"] is not None and s["elec_off"] < 15.0 and abs(s["elec_off"] - exp_off) > TOLERANCE:
+                failures.append(f"Row {s['plateau_end_row']}-to-Next: OFF {s['elec_off']}s")
+                
+        status = "FAIL" if failures else "PASS"
+        if failures:
+            evidence = (
+                f"BUG: {phase_name} agitation timing mismatch detected! ON Avg was {avg_on}s and OFF Avg was {avg_off}s. "
+                f"Anomalies found at: {', '.join(failures[:3])}. "
+                f"EXPECTED: ON: {exp_on}s and OFF: {exp_off}s. "
+                f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: {phase_name})."
+            )
         else:
-            m4_strokes.append(s)
+            evidence = f"Verified {len(movement_strokes)} {phase_name} cycles. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All match specification."
+            
+        expected_sec_str = f"ON: {exp_on}s | OFF: {exp_off}s"
+        actual_sec_str = f"ON: {avg_on}s | OFF: {avg_off}s"
+            
+        return {
+            "Row_Index": f"{movement_strokes[0]['start_row']}-{movement_strokes[-1]['plateau_end_row']}",
+            "Test_Name": f"{phase_name} Agitation (Level {level_key})",
+            "Status": status,
+            "Expected_Sec": expected_sec_str,
+            "Actual_Sec": actual_sec_str,
+            "Technical_Evidence": evidence
+        }
 
     # ── Quick Course Exception: Skip M2 & M3 per Sharp Spec ──
     # "For Quick course only, skip M2 & M3" (Source: Course group1.png note)
@@ -236,239 +323,18 @@ def analyze_telemetry(raw_data_log, program_name, level_str):
             )
         })
     else:
-        # ── M2: Initial Wash Agitation Validation ──
-        expected_on, expected_off = spec_set["m2"]
-        if m2_strokes:
-            on_times = [s["elec_on"] for s in m2_strokes]
-            off_times = [s["elec_off"] for idx, s in enumerate(m2_strokes) if idx < len(m2_strokes) - 1 and s["elec_off"] is not None]
-            
-            avg_on = round(np.mean(on_times), 2) if on_times else 0.0
-            avg_off = round(np.mean(off_times), 2) if off_times else 0.0
-            
-            failures = []
-            for idx, s in enumerate(m2_strokes):
-                if abs(s["elec_on"] - expected_on) > TOLERANCE:
-                    failures.append(f"Row {s['start_row']}: ON {s['elec_on']}s (exp {expected_on}s)")
-                if idx < len(m2_strokes) - 1 and s["elec_off"] is not None and abs(s["elec_off"] - expected_off) > TOLERANCE:
-                    failures.append(f"Row {s['end_row']}: OFF {s['elec_off']}s (exp {expected_off}s)")
-                    
-            m2_status = "FAIL" if failures else "PASS"
-            if failures:
-                m2_evidence = (
-                    f"BUG: Initial wash agitation timing mismatch detected! ON Avg was {avg_on}s and OFF Avg was {avg_off}s. "
-                    f"Anomalies found at: {', '.join(failures[:3])}. "
-                    f"EXPECTED: ON: {expected_on}s and OFF: {expected_off}s. "
-                    f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: M2)."
-                )
-            else:
-                m2_evidence = f"Verified {len(m2_strokes)} initial agitation cycles. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All cycles match specification within strict ±0.25s HIL safety tolerance."
-                
-            verifications.append({
-                "Row_Index": f"{m2_strokes[0]['start_row']}-{m2_strokes[-1]['plateau_end_row']}",
-                "Test_Name": f"M2 Initial Wash Agitation (Level {level_key})",
-                "Status": m2_status,
-                "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
-                "Actual_Sec": f"ON: {avg_on}s | OFF: {avg_off}s",
-                "Technical_Evidence": m2_evidence
-            })
-        else:
-            verifications.append({
-                "Row_Index": 1,
-                "Test_Name": f"M2 Initial Wash Agitation (Level {level_key})",
-                "Status": "FAIL",
-                "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
-                "Actual_Sec": "ON: 0.0s | OFF: 0.0s",
-                "Technical_Evidence": (
-                    f"BUG: Dead Motor! No wash agitation strokes detected during the M2 Initial Wash phase. "
-                    f"EXPECTED: Motor should agitate with ON: {expected_on}s / OFF: {expected_off}s. "
-                    f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: M2)."
-                )
-            })
-
-        # ── M3: Intermediate Agitation (2nd Water Supply) Validation ──
-        expected_on, expected_off = spec_set["m3"]
-        if m3_strokes:
-            on_times = [s["elec_on"] for s in m3_strokes]
-            off_times = [s["elec_off"] for idx, s in enumerate(m3_strokes) if idx < len(m3_strokes) - 1 and s["elec_off"] is not None]
-            
-            avg_on = round(np.mean(on_times), 2) if on_times else 0.0
-            avg_off = round(np.mean(off_times), 2) if off_times else 0.0
-            
-            failures = []
-            for idx, s in enumerate(m3_strokes):
-                if abs(s["elec_on"] - expected_on) > TOLERANCE:
-                    failures.append(f"Row {s['start_row']}: ON {s['elec_on']}s")
-                if idx < len(m3_strokes) - 1 and s["elec_off"] is not None and abs(s["elec_off"] - expected_off) > TOLERANCE:
-                    failures.append(f"Row {s['end_row']}: OFF {s['elec_off']}s")
-                    
-            m3_status = "FAIL" if failures else "PASS"
-            if failures:
-                m3_evidence = (
-                    f"BUG: Intermediate water supply agitation timing mismatch detected! ON Avg was {avg_on}s and OFF Avg was {avg_off}s. "
-                    f"Anomalies found at: {', '.join(failures[:3])}. "
-                    f"EXPECTED: ON: {expected_on}s and OFF: {expected_off}s. "
-                    f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: M3)."
-                )
-            else:
-                m3_evidence = f"Verified {len(m3_strokes)} intermediate cycles during water supply. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All intermediate fill agitation cycles match specification."
-                
-            verifications.append({
-                "Row_Index": f"{m3_strokes[0]['start_row']}-{m3_strokes[-1]['plateau_end_row']}",
-                "Test_Name": f"M3 Intermediate Agitation (Level {level_key})",
-                "Status": m3_status,
-                "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
-                "Actual_Sec": f"ON: {avg_on}s | OFF: {avg_off}s",
-                "Technical_Evidence": m3_evidence
-            })
-        else:
-            valves_active = any((r[3] > 4.0 or r[4] > 4.0) and r[0] > (strokes[0][0][0] if strokes else 0) for r in raw_data_log)
-            if valves_active:
-                verifications.append({
-                    "Row_Index": 1,
-                    "Test_Name": f"M3 Intermediate Agitation (Level {level_key})",
-                    "Status": "FAIL",
-                    "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
-                    "Actual_Sec": "ON: 0.0s | OFF: 0.0s",
-                    "Technical_Evidence": (
-                        f"BUG: Dead Motor during intermediate water supply! Water valves were active, but no M3 agitation strokes were detected. "
-                        f"EXPECTED: Motor should agitate with ON: {expected_on}s / OFF: {expected_off}s. "
-                        f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: M3)."
-                    )
-                })
-
-    # ── M4: Main Wash Agitation Validation ──
-    expected_on, expected_off = spec_set["m4"]
-    if m4_strokes:
-        on_times = [s["elec_on"] for s in m4_strokes]
-        off_times = [s["elec_off"] for idx, s in enumerate(m4_strokes) if idx < len(m4_strokes) - 1 and s["elec_off"] is not None]
+        verifications.append(validate_movement(m2_strokes, "M2", spec_set["m2"]))
+        verifications.append(validate_movement(m3_strokes, "M3", spec_set["m3"]))
         
-        avg_on = round(np.mean(on_times), 2) if on_times else 0.0
-        avg_off = round(np.mean(off_times), 2) if off_times else 0.0
-        
-        failures = []
-        for idx, s in enumerate(m4_strokes):
-            if abs(s["elec_on"] - expected_on) > TOLERANCE:
-                failures.append(f"Row {s['start_row']}: ON {s['elec_on']}s")
-            if idx < len(m4_strokes) - 1 and s["elec_off"] is not None and abs(s["elec_off"] - expected_off) > TOLERANCE:
-                failures.append(f"Row {s['end_row']}: OFF {s['elec_off']}s")
-                
-        m4_status = "FAIL" if failures else "PASS"
-        if failures:
-            m4_evidence = (
-                f"BUG: Main wash agitation timing mismatch detected! ON Avg was {avg_on}s and OFF Avg was {avg_off}s. "
-                f"Anomalies found at: {', '.join(failures[:3])}. "
-                f"EXPECTED: ON: {expected_on}s and OFF: {expected_off}s. "
-                f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: M4)."
-            )
-        else:
-            m4_evidence = f"Verified {len(m4_strokes)} main high-load wash cycles. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All main high-load wash cycles match specification."
-            
-        verifications.append({
-            "Row_Index": f"{m4_strokes[0]['start_row']}-{m4_strokes[-1]['plateau_end_row']}",
-            "Test_Name": f"M4 Main Wash Agitation (Level {level_key})",
-            "Status": m4_status,
-            "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
-            "Actual_Sec": f"ON: {avg_on}s | OFF: {avg_off}s",
-            "Technical_Evidence": m4_evidence
-        })
-    else:
-        verifications.append({
-            "Row_Index": 1,
-            "Test_Name": f"M4 Main Wash Agitation (Level {level_key})",
-            "Status": "FAIL",
-            "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
-            "Actual_Sec": "ON: 0.0s | OFF: 0.0s",
-            "Technical_Evidence": (
-                f"BUG: Dead Motor! No main wash agitation strokes detected during M4. "
-                f"EXPECTED: Motor should agitate with ON: {expected_on}s / OFF: {expected_off}s. "
-                f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: M4)."
-            )
-        })
+    verifications.append(validate_movement(m4_strokes, "M4", spec_set["m4"]))
+    if program_name == "Blanket":
+        mu_expected = (TIMINGS["Blanket_MU"]["on"], TIMINGS["Blanket_MU"]["off"])
+        verifications.append(validate_movement(mu_strokes, "MU", mu_expected))
+    elif course_group != "Group3":
+        verifications.append(validate_movement(mu_strokes, "MU", (TIMINGS["MU"]["on"], TIMINGS["MU"]["off"])))
+    
 
-    # ── MU: Unbalance Stir / Fragrance Agitation Validation ──
-    expected_on, expected_off = TIMINGS["MU"]["on"], TIMINGS["MU"]["off"]
-    if mu_strokes:
-        on_times = [s["elec_on"] for s in mu_strokes]
-        off_times = [s["elec_off"] for idx, s in enumerate(mu_strokes) if idx < len(mu_strokes) - 1 and s["elec_off"] is not None]
-        
-        avg_on = round(np.mean(on_times), 2) if on_times else 0.0
-        avg_off = round(np.mean(off_times), 2) if off_times else 0.0
-        
-        failures = []
-        for idx, s in enumerate(mu_strokes):
-            if abs(s["elec_on"] - expected_on) > TOLERANCE:
-                failures.append(f"Row {s['start_row']}: ON {s['elec_on']}s")
-            if idx < len(mu_strokes) - 1 and s["elec_off"] is not None and abs(s["elec_off"] - expected_off) > TOLERANCE:
-                failures.append(f"Row {s['end_row']}: OFF {s['elec_off']}s")
-                
-        mu_status = "FAIL" if failures else "PASS"
-        if failures:
-            mu_evidence = (
-                f"BUG: Unbalance stir timing mismatch detected! ON Avg was {avg_on}s and OFF Avg was {avg_off}s. "
-                f"Anomalies found at: {', '.join(failures[:3])}. "
-                f"EXPECTED: ON: {expected_on}s and OFF: {expected_off}s. "
-                f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: MU)."
-            )
-        else:
-            mu_evidence = f"Verified {len(mu_strokes)} gentle unbalance stir / fragrance cycles. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All unbalance correction / fragrance agitation cycles match specification."
-            
-        verifications.append({
-            "Row_Index": f"{mu_strokes[0]['start_row']}-{mu_strokes[-1]['plateau_end_row']}",
-            "Test_Name": "MU Unbalance Stir / Fragrance Agitation",
-            "Status": mu_status,
-            "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
-            "Actual_Sec": f"ON: {avg_on}s | OFF: {avg_off}s",
-            "Technical_Evidence": mu_evidence
-        })
-    else:
-        if spin_row_indices:
-            verifications.append({
-                "Row_Index": spin_row_indices[0],
-                "Test_Name": "MU Unbalance Stir / Fragrance Agitation",
-                "Status": "FAIL",
-                "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
-                "Actual_Sec": "ON: 0.0s | OFF: 0.0s",
-                "Technical_Evidence": (
-                    f"BUG: Dead Motor before spin! Spin was initiated, but no MU unbalance stir strokes were detected beforehand. "
-                    f"EXPECTED: Motor should agitate with ON: {expected_on}s / OFF: {expected_off}s. "
-                    f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Movement: MU)."
-                )
-            })
-
-    # ── Anti-Wrinkle Untangle Validation ──
     if aw_strokes:
-        expected_on, expected_off = 0.8, 1.0
-        on_times = [s["elec_on"] for s in aw_strokes]
-        off_times = [s["elec_off"] for idx, s in enumerate(aw_strokes) if idx < len(aw_strokes) - 1 and s["elec_off"] is not None]
-        
-        avg_on = round(np.mean(on_times), 2) if on_times else 0.0
-        avg_off = round(np.mean(off_times), 2) if off_times else 0.0
-        
-        failures = []
-        for idx, s in enumerate(aw_strokes):
-            if abs(s["elec_on"] - expected_on) > TOLERANCE:
-                failures.append(f"Row {s['start_row']}: ON {s['elec_on']}s")
-            if idx < len(aw_strokes) - 1 and s["elec_off"] is not None and abs(s["elec_off"] - expected_off) > TOLERANCE:
-                failures.append(f"Row {s['end_row']}: OFF {s['elec_off']}s")
-                
-        aw_status = "FAIL" if failures else "PASS"
-        if failures:
-            aw_evidence = (
-                f"BUG: Post-spin Anti-Wrinkle untangle timing mismatch detected! ON Avg was {avg_on}s and OFF Avg was {avg_off}s. "
-                f"Anomalies found at: {', '.join(failures[:3])}. "
-                f"EXPECTED: ON: {expected_on}s and OFF: {expected_off}s. "
-                f"SOURCE: Sharp HIL Specification Sheet (Course: {program_name}, Level: LEV-{level_key}, Anti-Wrinkle Logic)."
-            )
-        else:
-            aw_evidence = f"Verified {len(aw_strokes)} post-spin Anti-Wrinkle untangle cycles. Avg ON: {avg_on}s / Avg OFF: {avg_off}s. All Anti-Wrinkle untangle cycles match specification."
-            
-        verifications.append({
-            "Row_Index": aw_strokes[0]["start_row"],
-            "Test_Name": "Anti-Wrinkle Post-Spin Untangle Verification",
-            "Status": aw_status,
-            "Expected_Sec": f"ON: {expected_on}s | OFF: {expected_off}s",
-            "Actual_Sec": f"ON: {avg_on}s | OFF: {avg_off}s",
-            "Technical_Evidence": aw_evidence
-        })
+        verifications.append(validate_movement(aw_strokes, "Anti-Wrinkle", (0.8, 1.0)))
 
     return verifications
