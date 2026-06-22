@@ -61,7 +61,13 @@ class SequenceValidator(QObject):
 
         times = self.sequence_chart[program_name][level]
         
-        # 1. Delay Start Option
+        # 1. Weight Detection (Happens physically first: brief motor spin right after START)
+        # Cancelled for: Delicates, Wool, Blanket, Tub Clean
+        no_wd_courses = ["Delicates", "Wool", "Blanket", "Tub Clean"]
+        if program_name not in no_wd_courses:
+            self.expected_phases.append({"name": "WEIGHT_DETECT", "duration_sec": 7.2, "type": "strict"})
+
+        # 2. Delay Start Option (After weight detection, machine sleeps for the delay period)
         if delay_option != "None":
             try:
                 delay_hours = int(delay_option.split(" ")[0])
@@ -69,8 +75,8 @@ class SequenceValidator(QObject):
                 self.expected_phases.append({"name": "DELAY_START", "duration_sec": delay_sec, "type": "max_limit"})
             except ValueError:
                 pass
-        
-        # 2. Soak Option (User-selected soak time as max limit ceiling)
+
+        # 3. Soak Option (User-selected soak time as max limit ceiling)
         # Soak is a composite phase (Pause + Rotating cycles). Machine must complete within selected time.
         if soak_option == "1 Hour":
             self.expected_phases.append({"name": "SOAK", "duration_sec": 3600, "type": "max_limit"})
@@ -78,12 +84,6 @@ class SequenceValidator(QObject):
             self.expected_phases.append({"name": "SOAK", "duration_sec": 7200, "type": "max_limit"})
         elif soak_option == "4 Hours":
             self.expected_phases.append({"name": "SOAK", "duration_sec": 14400, "type": "max_limit"})
-
-        # 3. Weight Detection Exceptions
-        # Cancelled for: Delicates, Wool, Blanket, Tub Clean
-        no_wd_courses = ["Delicates", "Wool", "Blanket", "Tub Clean"]
-        if program_name not in no_wd_courses:
-            self.expected_phases.append({"name": "WEIGHT_DETECT", "duration_sec": 7.2, "type": "strict"})
 
         # 3. Main Wash
         main_wash_sec = times.get("main_wash_sec", 0)
