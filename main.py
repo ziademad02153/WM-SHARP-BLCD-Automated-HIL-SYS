@@ -6,7 +6,8 @@ import qtawesome as qta
 import pyqtgraph as pg
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QListWidget, QListWidgetItem, QFileDialog, QGroupBox,
-                             QCheckBox, QComboBox, QFrame, QMessageBox, QGraphicsOpacityEffect)
+                             QCheckBox, QComboBox, QFrame, QMessageBox, QGraphicsOpacityEffect,
+                             QGridLayout, QSizePolicy)
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtCore import Qt, QTimer
 
@@ -250,7 +251,7 @@ class MainUI(QMainWindow):
         y_axis.setTicks(ticks)
         y_axis.setStyle(tickFont=QFont("Consolas", 10, QFont.Bold))
         self.plot_widget.showGrid(x=True, y=True, alpha=0.4)
-        self.plot_widget.setYRange(0, 80, padding=0.05)
+        self.plot_widget.setYRange(0, 80, 0.05)
         self.plot_widget.setMouseEnabled(y=False) 
         self.curves = []
         for i, name in enumerate(self.channels):
@@ -271,13 +272,18 @@ class MainUI(QMainWindow):
         bottom_layout.addWidget(log_group, stretch=4)
         
         ctrl_group = QGroupBox("CONTROL PANEL")
-        ctrl_layout = QVBoxLayout()
+        ctrl_layout = QHBoxLayout()
+        left_vbox = QVBoxLayout()
+        right_vbox = QVBoxLayout()
+
         self.program_combo = QComboBox()
         self.program_combo.addItems(["Regular", "Quick", "Heavy", "Baby Care", "Cotton", "Delicates", "Wool", "Jeans", "Blanket", "Quick Rinse", "Sports Wear", "Tub Clean"])
         self.program_combo.currentTextChanged.connect(self.change_program)
+        
         self.btn_start = QPushButton(qta.icon('fa5s.play', color='#39FF14'), " START TEST SEQUENCE")
         self.btn_start.setMinimumHeight(45)
         self.btn_start.clicked.connect(self.start_recording)
+        
         self.btn_stop = QPushButton(qta.icon('fa5s.stop', color='#FF3131'), " STOP TEST")
         self.btn_stop.setMinimumHeight(45)
         self.btn_stop.clicked.connect(self.stop_recording)
@@ -299,23 +305,62 @@ class MainUI(QMainWindow):
         delay_options = ["None"] + [f"{i} Hour{'s' if i > 1 else ''}" for i in range(1, 25)]
         self.delay_combo.addItems(delay_options)
         self.delay_combo.currentTextChanged.connect(lambda: self.change_program(self.program_combo.currentText()))
+
+        # Custom time overrides (reference for agitation validator)
+        self.wash_time_combo = QComboBox()
+        wash_opts = ["Default"] + [f"{m} Min" for m in [5,8,10,12,15,18,20,25,30,35,40,45,50,55,60]]
+        self.wash_time_combo.addItems(wash_opts)
+
+        self.rinse_time_combo = QComboBox()
+        rinse_opts = ["Default"] + [f"{m} Min" for m in [2,3,4,5,6,7,8,10,12,15]]
+        self.rinse_time_combo.addItems(rinse_opts)
+
+        self.spin_time_combo = QComboBox()
+        spin_opts = ["Default"] + [f"{m} Min" for m in [3,5,6,7,8,9,10,12,15]]
+        self.spin_time_combo.addItems(spin_opts)
+
+        # Populate Left Layout
+        left_vbox.addWidget(QLabel("Test Program Protocol:"))
+        left_vbox.addWidget(self.program_combo)
+        left_vbox.addSpacing(5)
+        left_vbox.addWidget(QLabel("Target Water Level:"))
+        left_vbox.addWidget(self.level_combo)
+        left_vbox.addSpacing(5)
+        left_vbox.addWidget(QLabel("Soak Time Option:"))
+        left_vbox.addWidget(self.soak_combo)
+        left_vbox.addSpacing(5)
+        left_vbox.addWidget(QLabel("Delay Start:"))
+        left_vbox.addWidget(self.delay_combo)
+        left_vbox.addSpacing(15)
+        left_vbox.addWidget(self.btn_start)
+        left_vbox.addWidget(self.btn_stop)
+        left_vbox.addWidget(self.btn_force_save)
+        left_vbox.addStretch()
+
+        # Populate Right Layout
+        lbl_style = "color: #00D4FF; font-weight: bold; font-size: 11px;"
+        lbl_w = QLabel("Wash Time Override:")
+        lbl_w.setStyleSheet(lbl_style)
+        right_vbox.addWidget(lbl_w)
+        right_vbox.addWidget(self.wash_time_combo)
+        right_vbox.addSpacing(15)
         
-        ctrl_layout.addWidget(QLabel("Test Program Protocol:"))
-        ctrl_layout.addWidget(self.program_combo)
-        ctrl_layout.addSpacing(5)
-        ctrl_layout.addWidget(QLabel("Target Water Level:"))
-        ctrl_layout.addWidget(self.level_combo)
-        ctrl_layout.addSpacing(5)
-        ctrl_layout.addWidget(QLabel("Soak Time Option:"))
-        ctrl_layout.addWidget(self.soak_combo)
-        ctrl_layout.addSpacing(5)
-        ctrl_layout.addWidget(QLabel("Delay Start:"))
-        ctrl_layout.addWidget(self.delay_combo)
-        ctrl_layout.addSpacing(15)
-        ctrl_layout.addWidget(self.btn_start)
-        ctrl_layout.addWidget(self.btn_stop)
-        ctrl_layout.addWidget(self.btn_force_save)
-        ctrl_layout.addStretch()
+        lbl_r = QLabel("Rinse Time Override:")
+        lbl_r.setStyleSheet(lbl_style)
+        right_vbox.addWidget(lbl_r)
+        right_vbox.addWidget(self.rinse_time_combo)
+        right_vbox.addSpacing(15)
+        
+        lbl_s = QLabel("Spin Time Override:")
+        lbl_s.setStyleSheet(lbl_style)
+        right_vbox.addWidget(lbl_s)
+        right_vbox.addWidget(self.spin_time_combo)
+        right_vbox.addStretch()
+
+        # Add to main ctrl layout
+        ctrl_layout.addLayout(left_vbox, stretch=1)
+        ctrl_layout.addSpacing(10)
+        ctrl_layout.addLayout(right_vbox, stretch=1)
         ctrl_group.setLayout(ctrl_layout)
         
         adv_group = QGroupBox("ADVANCED LOGIC MONITORING")
@@ -422,8 +467,21 @@ class MainUI(QMainWindow):
     def save_report(self):
         if len(self.raw_data_log) > 0:
             try:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                suggested_name = f"SHARP_TEST_{ts}.xlsx"
+                ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                
+                # Generate descriptive filename matching auto_save
+                prog_name = self.program_combo.currentText().replace(" ", "")
+                lev_name = self.level_combo.currentText()
+                load_map = {"LEV-1": "2k", "LEV-2": "4k", "LEV-3": "6k", "LEV-4": "13k"}
+                load_str = load_map.get(lev_name, lev_name)
+                
+                wash_over = self.wash_time_combo.currentText()
+                rinse_over = self.rinse_time_combo.currentText()
+                spin_over = self.spin_time_combo.currentText()
+                is_default = (wash_over == "Default" and rinse_over == "Default" and spin_over == "Default")
+                settings_str = "Default" if is_default else "Custom"
+                
+                suggested_name = f"{prog_name}_{lev_name}_{load_str}_{settings_str}_{ts}.xlsx"
                 
                 self.add_log("Opening save dialog...")
                 file_path, _ = QFileDialog.getSaveFileName(
@@ -437,21 +495,24 @@ class MainUI(QMainWindow):
                     test_cases = summary['test_cases'].copy() if isinstance(summary, dict) and 'test_cases' in summary else list(summary)
                     
                     # Run automated agitation timings analysis (M1 to MU)
+                    agitation_defects = []
                     try:
                         import agitation_analyzer
                         self.add_log("Running automated motor agitation timing validator...")
-                        agitation_results = agitation_analyzer.analyze_telemetry(
-                            self.raw_data_log, 
+                        agitation_defects = agitation_analyzer.analyze_telemetry(
+                            self.raw_data_log,
                             self.program_combo.currentText(),
-                            self.level_combo.currentText()
+                            self.level_combo.currentText(),
+                            wash_override=self.wash_time_combo.currentText(),
+                            rinse_override=self.rinse_time_combo.currentText(),
+                            spin_override=self.spin_time_combo.currentText()
                         )
-                        test_cases.extend(agitation_results)
-                        self.add_log(f"Agitation validation finished. Verified {len(agitation_results)} agitation areas.", "SUCCESS")
+                        self.add_log(f"Agitation validation: {len(agitation_defects)} defects found.", "SUCCESS")
                     except Exception as ag_err:
                         self.add_log(f"AGITATION VALIDATOR ERROR: {ag_err}", "ERROR")
-                        
+
                     exporter = ExcelExporter(file_path)
-                    exporter.export(self.raw_data_log, test_cases)
+                    exporter.export(self.raw_data_log, test_cases, defect_data=agitation_defects)
                     self.add_log("REPORT SAVED SUCCESSFULLY", "SUCCESS")
                     QMessageBox.information(self, "Save Success", f"Report saved successfully.")
                 else:
@@ -472,30 +533,51 @@ class MainUI(QMainWindow):
         test_cases = summary['test_cases'].copy() if isinstance(summary, dict) and 'test_cases' in summary else list(summary)
         
         # Run automated agitation timings analysis (M1 to MU)
+        agitation_defects = []
         try:
             import agitation_analyzer
             self.add_log("Running automated motor agitation timing validator...")
-            agitation_results = agitation_analyzer.analyze_telemetry(
-                self.raw_data_log, 
+            agitation_defects = agitation_analyzer.analyze_telemetry(
+                self.raw_data_log,
                 self.program_combo.currentText(),
-                self.level_combo.currentText()
+                self.level_combo.currentText(),
+                wash_override=self.wash_time_combo.currentText(),
+                rinse_override=self.rinse_time_combo.currentText(),
+                spin_override=self.spin_time_combo.currentText()
             )
-            test_cases.extend(agitation_results)
-            self.add_log(f"Agitation validation finished. Verified {len(agitation_results)} agitation areas.", "SUCCESS")
+            self.add_log(f"Agitation validation: {len(agitation_defects)} defects found.", "SUCCESS")
         except Exception as ag_err:
             self.add_log(f"AGITATION VALIDATOR ERROR: {ag_err}", "ERROR")
 
-        # Determine final status (if any test failed, including agitation timings!)
+        # Determine final status
         final_status = "SUCCESS"
         for entry in test_cases:
             if entry["Status"] == "FAIL":
                 final_status = "FAULT"
                 break
+        if agitation_defects:
+            final_status = "FAULT"
 
-        filename = os.path.join(save_dir, f"SHARP_TEST_{final_status}_{ts}.xlsx")
+        # Generate descriptive filename
+        prog_name = self.program_combo.currentText().replace(" ", "")
+        lev_name = self.level_combo.currentText()
+        
+        # Map levels to approximate loads based on Sharp standards
+        load_map = {"LEV-1": "2k", "LEV-2": "4k", "LEV-3": "6k", "LEV-4": "13k"}
+        load_str = load_map.get(lev_name, lev_name)
+        
+        wash_over = self.wash_time_combo.currentText()
+        rinse_over = self.rinse_time_combo.currentText()
+        spin_over = self.spin_time_combo.currentText()
+        
+        is_default = (wash_over == "Default" and rinse_over == "Default" and spin_over == "Default")
+        settings_str = "Default" if is_default else "Custom"
+
+        file_prefix = f"{prog_name}_{lev_name}_{load_str}_{settings_str}_{final_status}_{ts}"
+        filename = os.path.join(save_dir, f"{file_prefix}.xlsx")
         exporter = ExcelExporter(filename)
         try:
-            exporter.export(self.raw_data_log, test_cases)
+            exporter.export(self.raw_data_log, test_cases, defect_data=agitation_defects)
             self.add_log(f"REPORT SAVED: {filename}")
         except Exception as e:
             self.add_log(f"SAVE ERROR: {e}")
