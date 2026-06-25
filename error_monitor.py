@@ -97,10 +97,10 @@ class ErrorMonitor(QObject):
                 self.thermal_warning_logged = False
             
         # 3. Water Supply (E5) - 20 min limit
-        if phase == 'WATER_FILL' and (cold or hot):
+        if (cold or hot):
             self.water_supply_timer += 1
-            if self.water_supply_timer == 12000:
-                self._trigger("E5", row_index - self.water_supply_timer + 1, row_index, "Fill timeout: Target level not reached within 20m")
+            if self.water_supply_timer == 11700: # 19.5 min @ 10Hz
+                self._trigger("E5", row_index - self.water_supply_timer + 1, row_index, "Fill timeout: Target level not reached within 20m (Detected at 19.5m)")
         else:
             self.water_supply_timer = 0
             
@@ -123,6 +123,17 @@ class ErrorMonitor(QObject):
                 self._trigger("E7-3", row_index - self.motor_fail_timer + 1, row_index, "Spin failure: Motor stalled during spin cycle")
         else:
             self.motor_fail_timer = 0
+            
+        # 5b. Phantom RPM / Sensor Noise (e.g. 750 RPM from 50Hz water short)
+        if phase in ['WATER_FILL', 'IDLE', 'DRAIN'] and rpm > 300:
+            if not hasattr(self, 'phantom_rpm_timer'):
+                self.phantom_rpm_timer = 0
+            self.phantom_rpm_timer += 1
+            if self.phantom_rpm_timer > 50: # 5 seconds of impossible high RPM
+                self._trigger("SENSOR-SHORT", row_index - self.phantom_rpm_timer + 1, row_index, f"CRITICAL: Impossible {rpm} RPM detected during {phase}. Possible water leak on sensor (50Hz noise).")
+        else:
+            self.phantom_rpm_timer = 0
+
  
         # 6. Unbalance (E3-2)
         if len(history) > 1:

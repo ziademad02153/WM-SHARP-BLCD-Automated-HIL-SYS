@@ -312,7 +312,7 @@ class MainUI(QMainWindow):
         self.wash_time_combo.addItems(wash_opts)
 
         self.rinse_time_combo = QComboBox()
-        rinse_opts = ["Default"] + [f"{m} Min" for m in [2,3,4,5,6,7,8,10,12,15]]
+        rinse_opts = ["Default", "0 Times", "1 Time", "2 Times", "3 Times"]
         self.rinse_time_combo.addItems(rinse_opts)
 
         self.spin_time_combo = QComboBox()
